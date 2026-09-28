@@ -1,6 +1,6 @@
 {
   "name": "fc27-autobuyer",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Userscript de autobuyer para o Web App do FC 27 Ultimate Team",
   "scripts": {

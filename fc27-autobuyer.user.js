@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.3.1
+// @version      0.3.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,6 +20,8 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
+  const SCRIPT_VERSION = '0.3.2';
+
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
     { upTo: 10000, step: 100 },
@@ -459,26 +461,41 @@
     const installed = [];
 
     let rowSample = '';
+    const counters = { calls: 0, badges: 0, priced: 0, failed: 0, lastError: '' };
+
+    // Elemento que mostra exatamente o nome do jogador (ex.: "Hazard").
+    function findNameElement(root, name) {
+      const target = String(name || '').trim().toLowerCase();
+      if (!target) return null;
+      const all = root.querySelectorAll('*');
+      for (const el of all) {
+        if (el.classList.contains('fcab-fb')) continue;
+        const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim().toLowerCase();
+        if (own === target) return el;
+      }
+      return null;
+    }
 
     // Nas linhas de lista, a etiqueta vai ao lado do preço (mercado) ou do
     // nome do jogador (clube). Sobre a carta ela seria cortada pela borda.
-    function rowSpot(root) {
+    function rowSpot(root, name) {
       const auction = root.querySelector('.auction');
       if (auction) return { parent: auction, before: null, mode: 'inline' };
-      const name = root.querySelector('.name, .player-name, [class*="name"]:not(.fcab-fb)');
-      if (name && name.parentNode) return { parent: name.parentNode, before: name.nextSibling, mode: 'inline' };
+      const nameEl = findNameElement(root, name);
+      if (nameEl && nameEl.parentNode) return { parent: nameEl.parentNode, before: nameEl.nextSibling, mode: 'inline' };
       return { parent: root, before: null, mode: 'corner' };
     }
 
-    function badgeFor(root, kind) {
+    function badgeFor(root, kind, name) {
       let badge = root.querySelector('.fcab-fb');
       if (!badge) {
         badge = win.document.createElement('div');
         let spot = { parent: root, before: null, mode: 'card' };
         if (kind === 'row') {
-          spot = rowSpot(root);
-          if (!rowSample) rowSample = describeDom(root);
+          spot = rowSpot(root, name);
+          if (!rowSample) rowSample = spot.mode + ' | ' + describeDom(root);
         }
+        counters.badges++;
         badge.className = 'fcab-fb fcab-fb-' + spot.mode;
         spot.parent.insertBefore(badge, spot.before);
         // A carta costuma ser desenhada antes de entrar na tela; só dá para
@@ -497,22 +514,26 @@
     function show(view, args, kind) {
       const settings = getSettings();
       if (!settings.showCardPrices) return;
+      counters.calls++;
       const item = itemFromView(view, args);
       const root = rootFromView(view);
       if (!root || !root.querySelector || !isPlayerItem(item)) return;
       const card = { name: itemNameOf(item), definitionId: item.definitionId, rating: item.rating };
-      const badge = badgeFor(root, kind);
+      const badge = badgeFor(root, kind, card.name);
       const tag = card.definitionId + ':' + settings.platform;
       badge.dataset.tag = tag;
       badge.classList.remove('fcab-good');
       badge.textContent = 'FUTBIN …';
       prices.get(card, settings.platform).then((price) => {
+        counters.priced++;
         if (badge.dataset.tag !== tag) return;
         badge.textContent = 'FUTBIN ' + formatShort(price);
         const bin = item._auction && item._auction.buyNowPrice;
         badge.classList.toggle('fcab-good', bin > 0 && bin < price);
         badge.title = 'Menor preço no FUTBIN: ' + fmt(price);
-      }).catch(() => {
+      }).catch((err) => {
+        counters.failed++;
+        counters.lastError = err && err.message ? err.message : String(err);
         if (badge.dataset.tag === tag) badge.textContent = 'FUTBIN ?';
       });
     }
@@ -536,6 +557,7 @@
       },
       installed: () => installed.map((h) => h[0] + '.' + h[1]),
       rowSample: () => rowSample,
+      counters: () => counters,
     };
   }
 
@@ -1272,8 +1294,14 @@
             ['ponte FUTBIN (segundo script)', futbin.bridgeReady()],
             ['preço nas cartas: ' + (hooks.length ? hooks.join(', ') : 'nenhuma função de desenho encontrada'), hooks.length > 0],
             ['linha: ' + (deps.overlay.rowSample() || 'nenhuma lista vista ainda').slice(0, 400), true],
+            (() => {
+              const c = deps.overlay.counters();
+              return ['cartas desenhadas: ' + c.calls + ', etiquetas: ' + c.badges + ', com preço: ' + c.priced +
+                ', falhas: ' + c.failed + (c.lastError ? ' (último erro: ' + c.lastError + ')' : ''), c.failed === 0];
+            })(),
             ['FUTBIN em lote: ' + (bulk === null ? 'ainda não testado' : bulk ? 'funcionando' : 'indisponível, usando carta a carta'), bulk !== false],
           ]);
+          rows.unshift(['versão do script: ' + SCRIPT_VERSION, true]);
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
         }
         if (a === 'clearHistory' && win.confirm('Apagar o histórico de compras?')) {

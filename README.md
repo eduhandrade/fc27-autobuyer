@@ -34,7 +34,11 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
 
 Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 
-## Preços do FUTBIN
+## Preço nas cartas
+- Por padrão, cada carta mostra a **média de mercado da EA** (o campo `marketAverage` que o próprio Web App recebe; é o "Market average" da EA). Não depende de site externo nem faz requisições. Quando a EA não informa a média de uma carta, a etiqueta mostra "Média EA —".
+- Em **Config → Preço mostrado nas cartas** dá para escolher **FUTBIN**. O FUTBIN protege o site contra acesso automatizado e costuma recusar as consultas (erro 403); o script não tenta contornar essa proteção. Quando o FUTBIN bloqueia, as consultas ficam pausadas por 30 minutos e as cartas voltam a mostrar a média da EA.
+
+## Preços do FUTBIN (quando disponível)
 - **Em cada carta na tela** (resultados do mercado, lista de transferências, clube, elenco) aparece uma etiqueta **FUTBIN 17K**. Ela fica **verde** quando a carta está anunciada abaixo do preço do FUTBIN.
 - As cartas visíveis são consultadas juntas numa única requisição, e o preço fica guardado por 5 minutos. Se o FUTBIN não aceitar a consulta em lote, o script consulta carta a carta, em fila.
 - Dá para desligar as etiquetas em **Config → Mostrar preço do FUTBIN em cima de cada carta**.

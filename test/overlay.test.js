@@ -84,3 +84,39 @@ test('código curto do erro na etiqueta', () => {
   assert.equal(ab.errorCode('Wirtz não encontrado no FUTBIN'), 'não achou');
   assert.equal(ab.errorCode('???'), 'erro');
 });
+
+test('lê a média de mercado da EA em vários formatos', () => {
+  assert.equal(ab.eaMarketAverage({ marketAverage: 12500 }), 12500);
+  assert.equal(ab.eaMarketAverage({ _marketAverage: 900 }), 900);
+  assert.equal(ab.eaMarketAverage({ getMarketAverage: () => 3100 }), 3100);
+  assert.equal(ab.eaMarketAverage({ market_average: 777 }), 777);
+  assert.equal(ab.eaMarketAverage({ marketAverage: null }), null);
+  assert.equal(ab.eaMarketAverage({ marketAverage: -1 }), null);
+  assert.equal(ab.eaMarketAverage(null), null);
+});
+
+test('lista campos de preço do item para o diagnóstico', () => {
+  const s = ab.priceFieldsOf({ marketAverage: 10, marketDataMinPrice: 5, rating: 90, getX() {} });
+  assert.equal(s, 'marketAverage=10, marketDataMinPrice=5');
+});
+
+test('para de consultar o FUTBIN por 30 min depois de um bloqueio', async () => {
+  let t = 0;
+  let calls = 0;
+  const req = async () => { calls++; throw new Error('FUTBIN bloqueou (abra futbin.com ...)'); };
+  const wrapped = ab.withCircuitBreaker(req, { now: () => t });
+  await assert.rejects(wrapped('u'), /bloqueou/);
+  assert.equal(wrapped.blocked(), true);
+  await assert.rejects(wrapped('u'), /pausadas por mais 30 min/);
+  assert.equal(calls, 1);
+  t = 31 * 60 * 1000;
+  assert.equal(wrapped.blocked(), false);
+  await assert.rejects(wrapped('u'));
+  assert.equal(calls, 2);
+});
+
+test('erros comuns não pausam o FUTBIN', async () => {
+  const wrapped = ab.withCircuitBreaker(async () => { throw new Error('falha de rede'); });
+  await assert.rejects(wrapped('u'));
+  assert.equal(wrapped.blocked(), false);
+});

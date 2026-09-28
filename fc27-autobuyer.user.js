@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.3.5
+// @version      0.4.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.3.5';
+  const SCRIPT_VERSION = '0.4.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -334,6 +334,67 @@
     return request;
   }
 
+  // Preço médio de mercado que a própria EA manda nos dados da carta (o mesmo
+  // "Market average" do Web App). Não precisa de rede nem de site externo.
+  function readNumberField(item, names) {
+    for (const name of names) {
+      let v;
+      try {
+        v = typeof item['get' + name.charAt(0).toUpperCase() + name.slice(1)] === 'function'
+          ? item['get' + name.charAt(0).toUpperCase() + name.slice(1)]()
+          : undefined;
+      } catch (e) { v = undefined; }
+      if (v == null) v = item[name];
+      if (v == null) v = item['_' + name];
+      if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+    }
+    return null;
+  }
+
+  function eaMarketAverage(item) {
+    if (!item) return null;
+    const direct = readNumberField(item, ['marketAverage']);
+    if (direct) return direct;
+    // Nome pode vir diferente no objeto do Web App; procura qualquer campo parecido.
+    for (const key of Object.keys(item)) {
+      if (/market_?average/i.test(key) && typeof item[key] === 'number' && item[key] > 0) return item[key];
+    }
+    return null;
+  }
+
+  // Lista os campos de preço/mercado de um item (para o Diagnóstico).
+  function priceFieldsOf(item) {
+    if (!item) return '';
+    return Object.keys(item)
+      .filter((k) => /price|market|average|discard/i.test(k) && typeof item[k] !== 'function')
+      .slice(0, 10)
+      .map((k) => k + '=' + (item[k] && typeof item[k] === 'object' ? JSON.stringify(item[k]).slice(0, 60) : item[k]))
+      .join(', ');
+  }
+
+  // Se o FUTBIN bloquear (403/429), para de consultar por um tempo em vez de
+  // insistir, o que só piora o bloqueio.
+  function withCircuitBreaker(request, opts) {
+    opts = opts || {};
+    const now = opts.now || Date.now;
+    const pauseMs = opts.pauseMs || 30 * 60 * 1000;
+    let until = 0;
+    const wrapped = async function (url) {
+      if (now() < until) {
+        throw new Error('FUTBIN bloqueou; consultas pausadas por mais ' + Math.ceil((until - now()) / 60000) + ' min');
+      }
+      try {
+        return await request(url);
+      } catch (err) {
+        if (/bloqueou|respondeu (403|429)/.test(err && err.message)) until = now() + pauseMs;
+        throw err;
+      }
+    };
+    wrapped.isReady = request.isReady;
+    wrapped.blocked = () => now() < until;
+    return wrapped;
+  }
+
   function formatShort(n) {
     if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 2).replace(/\.?0+$/, '') + 'M';
     if (n >= 10000) return Math.round(n / 1000) + 'K';
@@ -444,6 +505,7 @@
       },
       bulkStatus: () => bulkWorks,
       bulkError: () => bulkError,
+      blocked: () => !!(request.blocked && request.blocked()),
     };
   }
 
@@ -478,6 +540,7 @@
     const installed = [];
 
     let rowSample = '';
+    let eaSample = '';
     const counters = { calls: 0, badges: 0, priced: 0, failed: 0, lastError: '' };
 
     // Elemento que mostra exatamente o nome do jogador (ex.: "Hazard").
@@ -565,24 +628,37 @@
       const badge = badgeFor(root, kind, card.name);
       const tag = card.definitionId + ':' + settings.platform;
       badge.dataset.tag = tag;
+      if (!eaSample) eaSample = priceFieldsOf(item) || '(nenhum campo de preço no item)';
+      const bin = item._auction && item._auction.buyNowPrice;
+      const avg = eaMarketAverage(item);
+      const setPrice = (label, price, title) => {
+        badge.textContent = label + ' ' + formatShort(price);
+        badge.classList.toggle('fcab-good', bin > 0 && bin < price);
+        badge.title = title;
+      };
+      const showEa = (why) => {
+        if (avg) {
+          counters.priced++;
+          setPrice('Média EA', avg, 'Média de mercado da EA: ' + fmt(avg) + (why ? ' (FUTBIN: ' + why + ')' : ''));
+        } else {
+          badge.classList.remove('fcab-good');
+          badge.textContent = why ? 'FUTBIN ? ' + errorCode(why) : 'Média EA —';
+          badge.title = why || 'A EA não informou média de mercado para esta carta';
+        }
+      };
+      if (settings.priceSource !== 'futbin' || prices.blocked()) return showEa(prices.blocked() ? 'bloqueado' : '');
       badge.classList.remove('fcab-good');
       badge.textContent = 'FUTBIN …';
       prices.get(card, settings.platform).then((price) => {
         counters.priced++;
         if (badge.dataset.tag !== tag) return;
-        badge.textContent = 'FUTBIN ' + formatShort(price);
-        const bin = item._auction && item._auction.buyNowPrice;
-        badge.classList.toggle('fcab-good', bin > 0 && bin < price);
-        badge.title = 'Menor preço no FUTBIN: ' + fmt(price);
+        setPrice('FUTBIN', price, 'Menor preço no FUTBIN: ' + fmt(price));
       }).catch((err) => {
         counters.failed++;
         const msg = err && err.message ? err.message : String(err);
         if (msg !== counters.lastError) onError(msg);
         counters.lastError = msg;
-        if (badge.dataset.tag === tag) {
-          badge.textContent = 'FUTBIN ? ' + errorCode(msg);
-          badge.title = counters.lastError;
-        }
+        if (badge.dataset.tag === tag) showEa(msg);
       });
     }
 
@@ -606,6 +682,7 @@
       installed: () => installed.map((h) => h[0] + '.' + h[1]),
       rowSample: () => rowSample,
       counters: () => counters,
+      eaSample: () => eaSample,
     };
   }
 
@@ -992,6 +1069,7 @@
     platform: 'ps',
     futbinMargin: 15,
     showCardPrices: true,
+    priceSource: 'ea',
   };
 
   function createStore(storage) {
@@ -1168,7 +1246,7 @@
       const c = deps.overlay && deps.overlay.counters();
       const msg = c && c.lastError;
       box.hidden = !msg;
-      if (msg) box.textContent = '⚠️ FUTBIN não respondeu direito: ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
+      if (msg) box.textContent = '⚠️ FUTBIN não respondeu direito (as cartas mostram a média da EA quando disponível): ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
     }
 
     function renderStatus() {
@@ -1251,7 +1329,10 @@
         '<option value="ps"' + (platform !== 'pc' ? ' selected' : '') + '>PlayStation / Xbox</option>' +
         '<option value="pc"' + (platform === 'pc' ? ' selected' : '') + '>PC</option></select>' +
         '<label><input type="checkbox" data-setting="showCardPrices"' + (app.state.settings.showCardPrices ? ' checked' : '') +
-        '> Mostrar preço do FUTBIN em cima de cada carta</label>' +
+        '> Mostrar preço em cada carta</label>' +
+        '<label>Preço mostrado nas cartas</label><select data-setting="priceSource">' +
+        '<option value="ea"' + (app.state.settings.priceSource !== 'futbin' ? ' selected' : '') + '>Média de mercado da EA (recomendado)</option>' +
+        '<option value="futbin"' + (app.state.settings.priceSource === 'futbin' ? ' selected' : '') + '>FUTBIN (pode ser bloqueado)</option></select>' +
         SETTING_FIELDS.map(([key, label]) =>
         '<label>' + label + '</label><input data-setting="' + key + '" inputmode="decimal" value="' + app.state.settings[key] + '">'
       ).join('');
@@ -1370,6 +1451,7 @@
             ['ponte FUTBIN (segundo script)', futbin.bridgeReady()],
             ['preço nas cartas: ' + (hooks.length ? hooks.join(', ') : 'nenhuma função de desenho encontrada'), hooks.length > 0],
             ['linha: ' + (deps.overlay.rowSample() || 'nenhuma lista vista ainda').slice(0, 400), true],
+            ['campos de preço da EA: ' + (deps.overlay.eaSample() || 'nenhuma carta vista ainda'), /market/i.test(deps.overlay.eaSample())],
             (() => {
               const c = deps.overlay.counters();
               return ['cartas desenhadas: ' + c.calls + ', etiquetas: ' + c.badges + ', com preço: ' + c.priced +
@@ -1413,6 +1495,12 @@
 
     panel.addEventListener('change', (e) => {
       const key = e.target.dataset.setting;
+      if (key === 'priceSource') {
+        app.state.settings.priceSource = e.target.value === 'futbin' ? 'futbin' : 'ea';
+        save();
+        log('Preço nas cartas: ' + (app.state.settings.priceSource === 'ea' ? 'média da EA' : 'FUTBIN') + '. Troque de tela para atualizar.', 'success');
+        return;
+      }
       if (key === 'showCardPrices') {
         app.state.settings.showCardPrices = e.target.checked;
         save();
@@ -1483,8 +1571,9 @@
     const app = { state: store.load(), captured: null };
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
-    const futbin = Object.assign(createFutbin(bridge), { bridgeReady: bridge.isReady });
-    const prices = createPriceService(bridge, futbin);
+    const futbinRequest = withCircuitBreaker(bridge);
+    const futbin = Object.assign(createFutbin(futbinRequest), { bridgeReady: bridge.isReady });
+    const prices = createPriceService(futbinRequest, futbin);
     const overlay = createPriceOverlay(win, prices, () => app.state.settings, (msg) => {
       if (ui) ui.log('FUTBIN: ' + msg, 'error');
     });
@@ -1532,6 +1621,7 @@
     baseDefId, parseShortPrice, pickFutbinHit, parseFutbinPrice, suggestPrices,
     createFutbin, createBridgeRequest, cardFromItems,
     formatShort, createPriceService, createPriceOverlay, lookupGlobal, errorCode,
+    eaMarketAverage, priceFieldsOf, withCircuitBreaker,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

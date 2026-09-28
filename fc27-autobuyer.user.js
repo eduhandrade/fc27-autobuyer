@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.3.4
+// @version      0.3.5
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.3.4';
+  const SCRIPT_VERSION = '0.3.5';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -580,7 +580,7 @@
         if (msg !== counters.lastError) onError(msg);
         counters.lastError = msg;
         if (badge.dataset.tag === tag) {
-          badge.textContent = 'FUTBIN ?';
+          badge.textContent = 'FUTBIN ? ' + errorCode(msg);
           badge.title = counters.lastError;
         }
       });
@@ -607,6 +607,22 @@
       rowSample: () => rowSample,
       counters: () => counters,
     };
+  }
+
+  // Código curto do erro, mostrado na própria etiqueta ("FUTBIN ? ponte").
+  function errorCode(msg) {
+    const m = String(msg || '');
+    if (/ponte FUTBIN não respondeu/.test(m)) return 'ponte';
+    if (/GM\.xmlHttpRequest/.test(m)) return 'permissão';
+    if (/bloqueou/.test(m)) return 'bloqueio';
+    if (/demorou/.test(m)) return 'lento';
+    if (/falha de rede/.test(m)) return 'rede';
+    if (/não encontrado no FUTBIN/.test(m)) return 'não achou';
+    if (/resposta inesperada/.test(m)) return 'formato';
+    if (/preço não encontrado/.test(m)) return 'sem preço';
+    const status = /respondeu (\d+)/.exec(m);
+    if (status) return status[1];
+    return 'erro';
   }
 
   // Resumo da estrutura de uma linha, mostrado no Diagnóstico para ajustar a
@@ -1515,7 +1531,7 @@
     Autobuyer, createEaAdapter, createStore, DEFAULT_SETTINGS,
     baseDefId, parseShortPrice, pickFutbinHit, parseFutbinPrice, suggestPrices,
     createFutbin, createBridgeRequest, cardFromItems,
-    formatShort, createPriceService, createPriceOverlay, lookupGlobal,
+    formatShort, createPriceService, createPriceOverlay, lookupGlobal, errorCode,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

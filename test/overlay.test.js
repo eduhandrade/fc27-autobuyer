@@ -75,3 +75,12 @@ test('acha objetos do Web App mesmo sem estarem em window', () => {
   assert.equal(ab.lookupGlobal({}, 'services'), undefined);
   assert.equal(ab.lookupGlobal({}, 'desconhecido'), undefined);
 });
+
+test('código curto do erro na etiqueta', () => {
+  assert.equal(ab.errorCode('a ponte FUTBIN não respondeu (o script ...)'), 'ponte');
+  assert.equal(ab.errorCode('FUTBIN bloqueou (abra futbin.com ...)'), 'bloqueio');
+  assert.equal(ab.errorCode('FUTBIN respondeu 404'), '404');
+  assert.equal(ab.errorCode('resposta inesperada do FUTBIN na busca: "x"'), 'formato');
+  assert.equal(ab.errorCode('Wirtz não encontrado no FUTBIN'), 'não achou');
+  assert.equal(ab.errorCode('???'), 'erro');
+});

@@ -188,10 +188,13 @@ test('captura só as buscas feitas manualmente no Web App', async () => {
   const { win } = fakeWindow();
   const ad = ab.createEaAdapter(win);
   const captured = [];
-  ad.hookManualSearch((c) => captured.push(c));
-  ad.hookManualSearch((c) => captured.push(c)); // segunda chamada não duplica
+  ad.hookManualSearch((c, card) => captured.push([c, card]));
+  ad.hookManualSearch((c, card) => captured.push([c, card])); // segunda chamada não duplica
   win.services.Item.searchTransferMarket({ type: 'player', maskedDefId: 42, maxBuy: 900 }, 1);
-  assert.deepEqual(captured, [{ type: 'player', maskedDefId: 42 }]);
+  assert.deepEqual(captured, [[{ type: 'player', maskedDefId: 42 }, null]]);
+  // Quando os resultados chegam, a carta encontrada é repassada (para o FUTBIN).
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(captured[1], [{ type: 'player', maskedDefId: 42 }, { name: 'Fulano', definitionId: 10, rating: 88 }]);
   await ad.search({ type: 'player', maskedDefId: 1 });
-  assert.equal(captured.length, 1);
+  assert.equal(captured.length, 2);
 });

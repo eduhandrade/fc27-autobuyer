@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.1.0
+// @version      0.2.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -184,6 +184,153 @@
   // Motor do bot
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Preços do FUTBIN
+  // ---------------------------------------------------------------------------
+
+  const FUTBIN_BASE = 'https://www.futbin.com';
+  const FUTBIN_YEAR = 27;
+  const FUTBIN_MAX_AGE = 15 * 60 * 1000;
+
+  // Cartas especiais usam o ID base do jogador somado a múltiplos de 2^24.
+  function baseDefId(defId) {
+    return defId % 16777216;
+  }
+
+  function parseShortPrice(text) {
+    const m = /(\d[\d.,]*)\s*([KM])?/i.exec(String(text || ''));
+    if (!m) return 0;
+    const suffix = (m[2] || '').toUpperCase();
+    if (suffix) {
+      const n = parseFloat(m[1].replace(',', '.'));
+      return Math.round(n * (suffix === 'K' ? 1000 : 1000000));
+    }
+    return parseInt(m[1].replace(/[.,]/g, ''), 10) || 0;
+  }
+
+  function futbinImageId(hit) {
+    try {
+      const m = /\/players\/p?(\d+)\.png/.exec(hit.playerImage.fixed.url.image1x);
+      return m ? parseInt(m[1], 10) : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function futbinRating(hit) {
+    return parseInt(hit && hit.ratingSquare && hit.ratingSquare.rating, 10) || 0;
+  }
+
+  // Escolhe, entre os resultados da busca do FUTBIN, a mesma versão da carta.
+  function pickFutbinHit(hits, card) {
+    if (!Array.isArray(hits) || !hits.length) return null;
+    const base = baseDefId(card.definitionId || 0);
+    return (
+      hits.find((h) => futbinImageId(h) === card.definitionId) ||
+      hits.find((h) => baseDefId(futbinImageId(h)) === base && futbinRating(h) === card.rating) ||
+      hits.find((h) => futbinRating(h) === card.rating) ||
+      hits.find((h) => baseDefId(futbinImageId(h)) === base) ||
+      null
+    );
+  }
+
+  // Lê o menor preço (BIN) da página do jogador no FUTBIN.
+  function parseFutbinPrice(html, platform) {
+    const box = platform === 'pc' ? 'platform-pc-only' : 'platform-ps-only';
+    const boxRe = new RegExp('class="[^"]*\\b(?:price-box\\b[^"]*\\b' + box + '|' + box + '\\b[^"]*\\bprice-box)\\b[^"]*"');
+    const boxMatch = boxRe.exec(html);
+    if (boxMatch) {
+      const rest = html.slice(boxMatch.index, boxMatch.index + 8000);
+      const lowRe = /class="[^"]*lowest-price[^"]*"[^>]*>([\s\S]{0,300}?)<\/(?:div|span)>/g;
+      let m;
+      while ((m = lowRe.exec(rest))) {
+        const price = parseShortPrice(m[1].replace(/<[^>]*>/g, ' '));
+        if (price > 0) return price;
+      }
+    }
+    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+    const s = /current price on FUT is ([\d,]+) on PlayStation, ([\d,]+) on Xbox, and ([\d,]+) on PC/.exec(text);
+    if (s) return parseShortPrice(platform === 'pc' ? s[3] : s[1]);
+    return 0;
+  }
+
+  // Sugestão: comprar com a margem configurada abaixo do FUTBIN e revender
+  // pelo preço do FUTBIN.
+  function suggestPrices(futbinPrice, marginPercent) {
+    if (!(futbinPrice > 0)) return null;
+    return {
+      maxBuy: roundDown(futbinPrice * (1 - (marginPercent || 0) / 100)),
+      sellPrice: roundDown(futbinPrice),
+    };
+  }
+
+  function createFutbin(request, now) {
+    now = now || Date.now;
+    const cache = new Map();
+    return {
+      async price(card, platform) {
+        const key = card.definitionId + ':' + platform;
+        const hit = cache.get(key);
+        if (hit && now() - hit.at < FUTBIN_MAX_AGE) return hit;
+        const searchUrl = FUTBIN_BASE + '/players/search?targetPage=PLAYER_PAGE&query=' +
+          encodeURIComponent(card.name) + '&year=' + FUTBIN_YEAR + '&evolutions=false';
+        let hits;
+        try {
+          hits = JSON.parse(await request(searchUrl));
+        } catch (e) {
+          throw new Error(e instanceof SyntaxError ? 'resposta inesperada do FUTBIN' : e.message);
+        }
+        const found = pickFutbinHit(hits, card);
+        if (!found) throw new Error(card.name + ' não encontrado no FUTBIN');
+        const html = await request(FUTBIN_BASE + '/' + FUTBIN_YEAR + '/player/' + found.id + '/player');
+        const price = parseFutbinPrice(html, platform);
+        if (!price) throw new Error('preço não encontrado na página do FUTBIN');
+        const result = { price, futbinId: found.id, at: now() };
+        cache.set(key, result);
+        return result;
+      },
+    };
+  }
+
+  // A página da EA não pode ler o futbin.com direto (bloqueio do navegador).
+  // O script "ponte" roda com permissão extra e faz a requisição por nós.
+  function createBridgeRequest(win, timeoutMs) {
+    let seq = 0;
+    let ready = false;
+    const pending = new Map();
+    win.addEventListener('fcab:bridge-ready', () => { ready = true; });
+    win.addEventListener('fcab:fetch:result', (e) => {
+      let d;
+      try { d = JSON.parse(e.detail); } catch (err) { return; }
+      const p = pending.get(d.id);
+      if (!p) return;
+      pending.delete(d.id);
+      clearTimeout(p.timer);
+      if (d.ok) p.resolve(d.text);
+      else p.reject(new Error(d.error || 'FUTBIN respondeu ' + d.status));
+    });
+    win.dispatchEvent(new win.CustomEvent('fcab:ping'));
+    function request(url) {
+      return new Promise((resolve, reject) => {
+        const id = ++seq;
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error('a ponte FUTBIN não respondeu (o script "FC27 Autobuyer - ponte FUTBIN" está instalado?)'));
+        }, timeoutMs || 20000);
+        pending.set(id, { resolve, reject, timer });
+        win.dispatchEvent(new win.CustomEvent('fcab:fetch', { detail: JSON.stringify({ id, url }) }));
+      });
+    }
+    request.isReady = () => ready;
+    return request;
+  }
+
+  function cardFromItems(items) {
+    const it = items && items[0];
+    if (!it || !it.definitionId) return null;
+    return { name: it.name, definitionId: it.definitionId, rating: it.rating };
+  }
+
   function emptyStats() {
     return { searches: 0, buys: 0, spent: 0, listed: 0, missed: 0, errors: 0, profit: 0 };
   }
@@ -195,6 +342,7 @@
       this.log = opts.log || function () {};
       this.onChange = opts.onChange || function () {};
       this.onPurchase = opts.onPurchase || function () {};
+      this.onSearchResults = opts.onSearchResults || function () {};
       this.random = opts.random || Math.random;
       this.running = false;
       this.status = 'parado';
@@ -286,6 +434,7 @@
       this.onChange();
       if (!res.success) return this.handleFailure(res.status, 'busca');
       this.consecutiveErrors = 0;
+      this.onSearchResults(target, res.items);
 
       const budgetLeft = s.budget > 0 ? s.budget - this.stats.spent : Infinity;
       const item = pickCandidate(res.items, target, {
@@ -296,7 +445,8 @@
       if (!item) return;
       this.seen.add(item.tradeId);
 
-      this.log('Achei ' + item.name + ' por ' + fmt(item.buyNow) + ' (' + target.name + '). Comprando...');
+      const ref = target.futbin && target.futbin.price ? ', FUTBIN ' + fmt(target.futbin.price) : '';
+      this.log('Achei ' + item.name + ' por ' + fmt(item.buyNow) + ' (' + target.name + ref + '). Comprando...');
       const buy = await this.adapter.buy(item.raw, item.buyNow);
       if (!buy.success) {
         if (classifyStatus(buy.status) === 'missed') {
@@ -397,6 +547,7 @@
         expires: a.expires,
         name: itemName(raw),
         rating: raw.rating,
+        definitionId: raw.definitionId,
       };
     }
 
@@ -434,10 +585,20 @@
         const original = svc.searchTransferMarket;
         if (original.__fcabHooked) return;
         const wrapped = function (criteria) {
+          const observable = original.apply(this, arguments);
           if (!internalCall) {
-            try { callback(serializeCriteria(criteria)); } catch (e) { /* ignora */ }
+            const captured = serializeCriteria(criteria);
+            try { callback(captured, null); } catch (e) { /* ignora */ }
+            // Os resultados trazem o nome da carta, usado para achar o preço no FUTBIN.
+            if (observable && typeof observable.observe === 'function') {
+              observe(observable).then((response) => {
+                const items = ((response.data && response.data.items) || []).map(toItem);
+                const card = cardFromItems(items);
+                if (card) callback(captured, card);
+              }).catch(() => {});
+            }
           }
-          return original.apply(this, arguments);
+          return observable;
         };
         wrapped.__fcabHooked = true;
         svc.searchTransferMarket = wrapped;
@@ -484,6 +645,8 @@
     maxSearches: 300,
     maxBuys: 10,
     budget: 0,
+    platform: 'ps',
+    futbinMargin: 15,
   };
 
   function createStore(storage) {
@@ -539,6 +702,9 @@
 #fcab-panel section[hidden]{display:none}
 #fcab-panel label{display:block;margin:8px 0 2px;font-size:12px;color:#aaa}
 #fcab-panel input[type=text],#fcab-panel input:not([type]){width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
+#fcab-panel select{width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
+#fcab-panel .fb{margin-top:4px}
+#fcab-panel .fb button{padding:4px 8px;font-size:12px;margin-top:4px}
 #fcab-panel .hint{font-size:12px;color:#999;margin:6px 0}
 #fcab-panel .tg{border:1px solid #2a2d33;border-radius:8px;padding:8px;margin:6px 0}
 #fcab-panel .tg .row{display:flex;gap:6px;align-items:center}
@@ -565,11 +731,12 @@
     ['maxSearches', 'Máximo de buscas por sessão (0 = sem limite)'],
     ['maxBuys', 'Máximo de compras por sessão (0 = sem limite)'],
     ['budget', 'Orçamento máximo por sessão em moedas (0 = sem limite)'],
+    ['futbinMargin', 'Margem abaixo do FUTBIN para sugerir a compra (%)'],
   ];
 
   function createUI(win, deps) {
     const doc = win.document;
-    const { app, store, engine, adapter } = deps;
+    const { app, store, engine, adapter, futbin } = deps;
     const logs = [];
     let tab = 'targets';
 
@@ -604,6 +771,7 @@
         <h4 style="margin:12px 0 4px">Novo alvo</h4>
         <p class="hint">Jeito fácil: feche este painel, vá em <b>Transferências → Pesquisar no mercado</b>, escolha o jogador e os filtros e toque em Pesquisar. A busca aparece aqui embaixo automaticamente.</p>
         <p class="hint" data-el="captured">Nenhuma busca capturada ainda.</p>
+        <p class="hint" data-el="capturedPrice"></p>
         <label>Ou ID do jogador na EA (deixe vazio para usar a busca capturada)</label>
         <input data-el="newId" inputmode="numeric">
         <label>Nome (só pra você identificar)</label>
@@ -676,6 +844,7 @@
             <button data-f="remove">🗑</button>
           </div>
           <small>${escapeHtml(describeCriteria(t.criteria))}</small>
+          <div class="fb">${futbinLine(t)}</div>
           <div class="grid">
             <div><label>Compra até</label><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"></div>
             <div><label>Revende por</label><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"></div>
@@ -683,8 +852,43 @@
         </div>`).join('');
     }
 
+    function futbinLine(t) {
+      if (!t.card) return '<small>FUTBIN: pesquise esse jogador no mercado (ou inicie o bot) para identificar a carta.</small>';
+      const f = t.futbin;
+      if (t.futbinError) return '<small>FUTBIN: ' + escapeHtml(t.futbinError) + '</small> <button data-f="futbin">↻</button>';
+      if (!f || !f.price) return '<small>FUTBIN: —</small> <button data-f="futbin">↻ Buscar preço</button>';
+      const mins = Math.max(0, Math.round((Date.now() - f.at) / 60000));
+      const sug = suggestPrices(f.price, app.state.settings.futbinMargin);
+      return '<small>FUTBIN: <b>' + fmt(f.price) + '</b> (há ' + mins + ' min) · sugestão: compra até ' +
+        fmt(sug.maxBuy) + ', revende ' + fmt(sug.sellPrice) + '</small><br>' +
+        '<button data-f="futbin">↻</button> <button data-f="applySuggestion">Usar sugestão</button>';
+    }
+
+    async function refreshTargetPrice(t, quiet) {
+      if (!t.card) return;
+      try {
+        t.futbin = await futbin.price(t.card, app.state.settings.platform);
+        t.futbinError = '';
+      } catch (err) {
+        t.futbinError = err.message;
+        if (!quiet) log('FUTBIN (' + t.name + '): ' + err.message, 'warn');
+      }
+      save();
+      renderTargets();
+    }
+
+    async function refreshStalePrices() {
+      for (const t of app.state.targets) {
+        if (t.card && (!t.futbin || Date.now() - t.futbin.at > FUTBIN_MAX_AGE)) await refreshTargetPrice(t, true);
+      }
+    }
+
     function renderSettings() {
-      el('settings').innerHTML = SETTING_FIELDS.map(([key, label]) =>
+      const platform = app.state.settings.platform;
+      el('settings').innerHTML = '<label>Plataforma (preço do FUTBIN)</label><select data-setting="platform">' +
+        '<option value="ps"' + (platform !== 'pc' ? ' selected' : '') + '>PlayStation / Xbox</option>' +
+        '<option value="pc"' + (platform === 'pc' ? ' selected' : '') + '>PC</option></select>' +
+        SETTING_FIELDS.map(([key, label]) =>
         '<label>' + label + '</label><input data-setting="' + key + '" inputmode="decimal" value="' + app.state.settings[key] + '">'
       ).join('');
     }
@@ -703,10 +907,29 @@
       }).join('') || '<div>Nenhuma compra ainda.</div>';
     }
 
-    function onCaptured(criteria) {
+    function onCaptured(criteria, card) {
       app.captured = criteria;
-      el('captured').innerHTML = 'Busca capturada: <b>' + escapeHtml(describeCriteria(criteria)) + '</b>';
-      if (!el('newName').value) el('newName').value = describeCriteria(criteria);
+      app.capturedCard = card || null;
+      const label = card ? card.name + ' ' + (card.rating || '') + ' · ' + describeCriteria(criteria) : describeCriteria(criteria);
+      el('captured').innerHTML = 'Busca capturada: <b>' + escapeHtml(label) + '</b>';
+      el('capturedPrice').textContent = card ? 'FUTBIN: buscando preço...' : '';
+      if (!card) {
+        if (!el('newName').value) el('newName').value = describeCriteria(criteria);
+        return;
+      }
+      el('newName').value = card.name + ' ' + (card.rating || '');
+      futbin.price(card, app.state.settings.platform).then((f) => {
+        if (app.capturedCard !== card) return;
+        app.capturedFutbin = f;
+        const sug = suggestPrices(f.price, app.state.settings.futbinMargin);
+        el('capturedPrice').innerHTML = 'FUTBIN: <b>' + fmt(f.price) + '</b> · sugestão preenchida abaixo (compra ' +
+          fmt(sug.maxBuy) + ', revenda ' + fmt(sug.sellPrice) + ').';
+        if (!el('newMax').value) el('newMax').value = sug.maxBuy;
+        if (!el('newSell').value) el('newSell').value = sug.sellPrice;
+      }).catch((err) => {
+        if (app.capturedCard !== card) return;
+        el('capturedPrice').textContent = 'FUTBIN: ' + err.message;
+      });
     }
 
     function addTarget() {
@@ -719,6 +942,7 @@
       if (sellPrice && sellPrice <= maxBuy) {
         if (!win.confirm('O preço de revenda é menor ou igual ao de compra. Adicionar mesmo assim?')) return;
       }
+      const card = id ? null : app.capturedCard;
       app.state.targets.push({
         id: Date.now().toString(36),
         name: el('newName').value.trim() || describeCriteria(criteria),
@@ -726,6 +950,8 @@
         maxBuy,
         sellPrice,
         enabled: true,
+        card,
+        futbin: card && app.capturedFutbin && app.capturedCard === card ? app.capturedFutbin : null,
       });
       save();
       ['newId', 'newName', 'newMax', 'newSell'].forEach((k) => { el(k).value = ''; });
@@ -753,7 +979,7 @@
 
     toggle.addEventListener('click', () => {
       panel.hidden = !panel.hidden;
-      if (!panel.hidden) { renderStatus(); renderTabs(); }
+      if (!panel.hidden) { renderStatus(); renderTabs(); refreshStalePrices(); }
     });
 
     panel.addEventListener('click', (e) => {
@@ -774,7 +1000,8 @@
         }
         if (a === 'add') addTarget();
         if (a === 'diagnose') {
-          el('diag').innerHTML = adapter.diagnose().map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
+          const rows = adapter.diagnose().concat([['ponte FUTBIN (segundo script)', futbin.bridgeReady()]]);
+          el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
         }
         if (a === 'clearHistory' && win.confirm('Apagar o histórico de compras?')) {
           app.state.history = [];
@@ -784,6 +1011,21 @@
         return;
       }
       const tg = e.target.closest('.tg');
+      const tgt = tg && app.state.targets.find((t) => t.id === tg.dataset.id);
+      if (tgt && e.target.dataset.f === 'futbin') {
+        e.target.disabled = true;
+        refreshTargetPrice(tgt, false);
+        return;
+      }
+      if (tgt && e.target.dataset.f === 'applySuggestion' && tgt.futbin) {
+        const sug = suggestPrices(tgt.futbin.price, app.state.settings.futbinMargin);
+        tgt.maxBuy = sug.maxBuy;
+        tgt.sellPrice = sug.sellPrice;
+        save();
+        renderTargets();
+        log('Preços de ' + tgt.name + ' ajustados pelo FUTBIN.', 'success');
+        return;
+      }
       if (tg && e.target.dataset.f === 'remove') {
         if (!win.confirm('Remover este alvo?')) return;
         app.state.targets = app.state.targets.filter((t) => t.id !== tg.dataset.id);
@@ -794,11 +1036,19 @@
 
     panel.addEventListener('change', (e) => {
       const key = e.target.dataset.setting;
+      if (key === 'platform') {
+        app.state.settings.platform = e.target.value === 'pc' ? 'pc' : 'ps';
+        app.state.targets.forEach((t) => { t.futbin = null; });
+        save();
+        refreshStalePrices();
+        return;
+      }
       if (key) {
         const v = parseFloat(String(e.target.value).replace(',', '.'));
         app.state.settings[key] = isFinite(v) && v >= 0 ? v : DEFAULT_SETTINGS[key];
         e.target.value = app.state.settings[key];
         save();
+        if (key === 'futbinMargin') renderTargets();
         return;
       }
       const tg = e.target.closest('.tg');
@@ -820,6 +1070,9 @@
     return {
       log,
       onCaptured,
+      onTargetCard(t) {
+        refreshTargetPrice(t, true);
+      },
       refresh() {
         if (panel.hidden) return;
         renderStatus();
@@ -847,6 +1100,8 @@
     const store = createStore(safeStorage(win));
     const app = { state: store.load(), captured: null };
     const adapter = createEaAdapter(win);
+    const bridge = createBridgeRequest(win);
+    const futbin = Object.assign(createFutbin(bridge), { bridgeReady: bridge.isReady });
     let ui = null;
     const engine = new Autobuyer({
       adapter,
@@ -858,14 +1113,25 @@
         if (app.state.history.length > 100) app.state.history.length = 100;
         store.save(app.state);
       },
+      // Alvos criados por ID ainda não sabem qual é a carta; a primeira busca
+      // do bot traz o nome, e aí dá para consultar o FUTBIN.
+      onSearchResults: (target, items) => {
+        const c = target.criteria || {};
+        if (target.card || !(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length))) return;
+        const card = cardFromItems(items);
+        if (!card) return;
+        target.card = card;
+        store.save(app.state);
+        ui.onTargetCard(target);
+      },
     });
-    ui = createUI(win, { app, store, engine, adapter });
+    ui = createUI(win, { app, store, engine, adapter, futbin });
     ui.log('Painel carregado. Aguardando o Web App...');
 
     const timer = setInterval(() => {
       if (!adapter.ready()) return;
       clearInterval(timer);
-      adapter.hookManualSearch((criteria) => ui.onCaptured(criteria));
+      adapter.hookManualSearch((criteria, card) => ui.onCaptured(criteria, card));
       ui.log('Web App detectado. Pronto para usar.', 'success');
     }, 1000);
   }
@@ -875,6 +1141,8 @@
     serializeCriteria, cacheBusterValues, buildCriteria, describeCriteria,
     pickCandidate, classifyStatus, checkLimits, parseCoins,
     Autobuyer, createEaAdapter, createStore, DEFAULT_SETTINGS,
+    baseDefId, parseShortPrice, pickFutbinHit, parseFutbinPrice, suggestPrices,
+    createFutbin, createBridgeRequest, cardFromItems,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

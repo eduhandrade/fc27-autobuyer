@@ -35,6 +35,9 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
 Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 
 ## Preços do FUTBIN
+- **Em cada carta na tela** (resultados do mercado, lista de transferências, clube, elenco) aparece uma etiqueta **FUTBIN 17K**. Ela fica **verde** quando a carta está anunciada abaixo do preço do FUTBIN.
+- As cartas visíveis são consultadas juntas numa única requisição, e o preço fica guardado por 5 minutos. Se o FUTBIN não aceitar a consulta em lote, o script consulta carta a carta, em fila.
+- Dá para desligar as etiquetas em **Config → Mostrar preço do FUTBIN em cima de cada carta**.
 - O FUTBIN mostra o **menor preço de "comprar agora"** atual de cada carta, não uma média. É esse valor que aparece no painel.
 - Cada alvo mostra o preço, há quanto tempo foi consultado, e os botões **↻** (atualizar) e **Usar sugestão**. Os preços são atualizados ao abrir o painel, se tiverem mais de 15 minutos.
 - Alvos criados por ID são identificados na primeira busca do bot.

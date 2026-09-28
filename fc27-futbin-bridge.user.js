@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer - ponte FUTBIN
 // @namespace    fc27-autobuyer
-// @version      0.2.0
+// @version      0.3.0
 // @description  Permite que o FC27 Autobuyer consulte preços no FUTBIN
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        GM.xmlHttpRequest

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.2.0
+// @version      0.3.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -325,6 +325,212 @@
     return request;
   }
 
+  function formatShort(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 2).replace(/\.?0+$/, '') + 'M';
+    if (n >= 10000) return Math.round(n / 1000) + 'K';
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(n);
+  }
+
+  // Preços para as cartas que aparecem na tela. Tenta primeiro o endpoint em
+  // lote do FUTBIN (vários jogadores por requisição, pelo ID da EA). Se ele não
+  // existir mais, cai para a busca carta a carta, em fila, para não sobrecarregar.
+  function createPriceService(request, futbin, opts) {
+    opts = opts || {};
+    const now = opts.now || Date.now;
+    const maxAge = opts.maxAge || 5 * 60 * 1000;
+    const batchDelay = opts.batchDelay == null ? 300 : opts.batchDelay;
+    const cache = new Map();
+    const pending = new Map();
+    let queue = [];
+    let timer = null;
+    let bulkWorks = null;
+
+    function bulkUrl(ids) {
+      return FUTBIN_BASE + '/' + FUTBIN_YEAR + '/playerPrices?player=' + ids[0] +
+        (ids.length > 1 ? '&rids=' + ids.slice(1).join(',') : '');
+    }
+
+    function settle(key, value, error) {
+      const waiters = pending.get(key) || [];
+      pending.delete(key);
+      if (value) cache.set(key, { price: value, at: now() });
+      waiters.forEach((w) => (value ? w.resolve(value) : w.reject(error || new Error('sem preço'))));
+    }
+
+    async function tryBulk(jobs, platform) {
+      const ids = jobs.map((j) => j.card.definitionId);
+      const data = JSON.parse(await request(bulkUrl(ids)));
+      const left = [];
+      for (const j of jobs) {
+        const entry = data && data[j.card.definitionId];
+        const p = entry && entry.prices && entry.prices[platform === 'pc' ? 'pc' : 'ps'];
+        const price = p ? parseShortPrice(p.LCPrice) : 0;
+        if (price > 0) settle(j.key, price);
+        else left.push(j);
+      }
+      return left;
+    }
+
+    async function perCard(jobs, platform) {
+      for (const j of jobs) {
+        try {
+          const r = await futbin.price(j.card, platform);
+          settle(j.key, r.price);
+        } catch (err) {
+          settle(j.key, 0, err);
+        }
+      }
+    }
+
+    async function flush() {
+      timer = null;
+      const jobs = queue;
+      queue = [];
+      const byPlatform = {};
+      jobs.forEach((j) => { (byPlatform[j.platform] = byPlatform[j.platform] || []).push(j); });
+      for (const platform of Object.keys(byPlatform)) {
+        let left = byPlatform[platform];
+        if (bulkWorks !== false) {
+          for (let i = 0; i < left.length; i += 20) {
+            const chunk = left.slice(i, i + 20);
+            try {
+              const rest = await tryBulk(chunk, platform);
+              bulkWorks = true;
+              await perCard(rest, platform);
+            } catch (err) {
+              if (bulkWorks === null) bulkWorks = false;
+              await perCard(chunk, platform);
+            }
+          }
+          continue;
+        }
+        await perCard(left, platform);
+      }
+    }
+
+    return {
+      get(card, platform) {
+        const key = card.definitionId + ':' + platform;
+        const hit = cache.get(key);
+        if (hit && now() - hit.at < maxAge) return Promise.resolve(hit.price);
+        return new Promise((resolve, reject) => {
+          if (!pending.has(key)) {
+            pending.set(key, []);
+            queue.push({ key, card, platform });
+            if (!timer) timer = setTimeout(flush, batchDelay);
+          }
+          pending.get(key).push({ resolve, reject });
+        });
+      },
+      bulkStatus: () => bulkWorks,
+    };
+  }
+
+  // Coloca uma etiqueta com o preço do FUTBIN em cada carta desenhada pelo
+  // Web App, "pendurando" o código nas funções que desenham as cartas.
+  const RENDER_HOOKS = [
+    ['UTItemTableCellView', 'render', 'row'],
+    ['UTPlayerItemView', 'renderItem', 'card'],
+    ['UTItemView', 'renderItem', 'card'],
+  ];
+
+  function isPlayerItem(item) {
+    if (!item || !item.definitionId) return false;
+    if (typeof item.isPlayer === 'function') return item.isPlayer();
+    return item.type === 'player' || item.type == null;
+  }
+
+  function itemFromView(view, args) {
+    const candidates = [args[0], view.data, view._data, view.item, view._item];
+    return candidates.find((c) => c && typeof c === 'object' && c.definitionId) || null;
+  }
+
+  function rootFromView(view) {
+    try {
+      if (typeof view.getRootElement === 'function') return view.getRootElement();
+    } catch (e) { /* ignora */ }
+    return view.__root || view._root || null;
+  }
+
+  function createPriceOverlay(win, prices, getSettings) {
+    const installed = [];
+
+    function badgeFor(root, kind) {
+      let badge = root.querySelector('.fcab-fb');
+      if (!badge) {
+        badge = win.document.createElement('div');
+        badge.className = 'fcab-fb fcab-fb-' + kind;
+        const spot = (kind === 'row' && root.querySelector('.auction')) || root;
+        spot.appendChild(badge);
+        // A carta costuma ser desenhada antes de entrar na tela; só dá para
+        // conferir o posicionamento depois que ela aparece.
+        if (spot === root) {
+          const fix = () => {
+            if (root.isConnected && win.getComputedStyle(root).position === 'static') root.style.position = 'relative';
+          };
+          fix();
+          (win.requestAnimationFrame || setTimeout)(fix);
+        }
+      }
+      return badge;
+    }
+
+    function show(view, args, kind) {
+      const settings = getSettings();
+      if (!settings.showCardPrices) return;
+      const item = itemFromView(view, args);
+      const root = rootFromView(view);
+      if (!root || !root.querySelector || !isPlayerItem(item)) return;
+      const card = { name: itemNameOf(item), definitionId: item.definitionId, rating: item.rating };
+      const badge = badgeFor(root, kind);
+      const tag = card.definitionId + ':' + settings.platform;
+      badge.dataset.tag = tag;
+      badge.classList.remove('fcab-good');
+      badge.textContent = 'FUTBIN …';
+      prices.get(card, settings.platform).then((price) => {
+        if (badge.dataset.tag !== tag) return;
+        badge.textContent = 'FUTBIN ' + formatShort(price);
+        const bin = item._auction && item._auction.buyNowPrice;
+        badge.classList.toggle('fcab-good', bin > 0 && bin < price);
+        badge.title = 'Menor preço no FUTBIN: ' + fmt(price);
+      }).catch(() => {
+        if (badge.dataset.tag === tag) badge.textContent = 'FUTBIN ?';
+      });
+    }
+
+    return {
+      install() {
+        for (const [className, method, kind] of RENDER_HOOKS) {
+          const C = lookupGlobal(win, className);
+          const proto = C && C.prototype;
+          if (!proto || typeof proto[method] !== 'function') continue;
+          if (installed.some((h) => h[0] === className)) continue;
+          const original = proto[method];
+          proto[method] = function () {
+            const out = original.apply(this, arguments);
+            try { show(this, arguments, kind); } catch (e) { /* nunca quebra o Web App */ }
+            return out;
+          };
+          installed.push([className, method]);
+        }
+        return installed.map((h) => h[0] + '.' + h[1]);
+      },
+      installed: () => installed.map((h) => h[0] + '.' + h[1]),
+    };
+  }
+
+  function itemNameOf(raw) {
+    try {
+      if (raw._staticData && raw._staticData.name) return raw._staticData.name;
+      if (typeof raw.getStaticData === 'function') {
+        const d = raw.getStaticData();
+        if (d && d.name) return d.name;
+      }
+    } catch (e) { /* ignora */ }
+    return String(raw.definitionId);
+  }
+
   function cardFromItems(items) {
     const it = items && items[0];
     if (!it || !it.definitionId) return null;
@@ -510,10 +716,31 @@
   // Integração com o Web App da EA
   // ---------------------------------------------------------------------------
 
+  // Objetos do Web App podem ser globais "de verdade" (window.x) ou globais
+  // léxicos (declarados com class/let), que não aparecem em window. Como este
+  // script roda dentro da página, dá para ler os dois pelo nome.
+  const PAGE_GLOBALS = {
+    services: () => (typeof services !== 'undefined' ? services : undefined),
+    UTSearchCriteriaDTO: () => (typeof UTSearchCriteriaDTO !== 'undefined' ? UTSearchCriteriaDTO : undefined),
+    UTItemTableCellView: () => (typeof UTItemTableCellView !== 'undefined' ? UTItemTableCellView : undefined),
+    UTPlayerItemView: () => (typeof UTPlayerItemView !== 'undefined' ? UTPlayerItemView : undefined),
+    UTItemView: () => (typeof UTItemView !== 'undefined' ? UTItemView : undefined),
+  };
+
+  function lookupGlobal(win, name) {
+    if (win && win[name] !== undefined) return win[name];
+    try {
+      return PAGE_GLOBALS[name] ? PAGE_GLOBALS[name]() : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   // O Web App expõe objetos globais (services, UTSearchCriteriaDTO...). O bot
   // usa esses mesmos objetos, então as requisições saem idênticas às do app.
   function createEaAdapter(win) {
     let internalCall = false;
+    const G = (name) => lookupGlobal(win, name);
 
     function observe(observable) {
       return new Promise((resolve) => {
@@ -557,31 +784,32 @@
 
     return {
       ready() {
-        return !!(win.services && win.services.Item && win.UTSearchCriteriaDTO);
+        const svc = G('services');
+        return !!(svc && svc.Item && G('UTSearchCriteriaDTO'));
       },
 
       diagnose() {
-        const s = win.services || {};
+        const s = G('services') || {};
         const item = s.Item || {};
         return [
           ['services.Item.searchTransferMarket', typeof item.searchTransferMarket === 'function'],
           ['services.Item.bid', typeof item.bid === 'function'],
           ['services.Item.list', typeof item.list === 'function'],
-          ['UTSearchCriteriaDTO', typeof win.UTSearchCriteriaDTO === 'function'],
+          ['UTSearchCriteriaDTO', typeof G('UTSearchCriteriaDTO') === 'function'],
           ['saldo de moedas', this.getCoins() != null],
         ];
       },
 
       getCoins() {
         try {
-          return win.services.User.getUser().coins.amount;
+          return G('services').User.getUser().coins.amount;
         } catch (e) {
           return null;
         }
       },
 
       hookManualSearch(callback) {
-        const svc = win.services.Item;
+        const svc = G('services').Item;
         const original = svc.searchTransferMarket;
         if (original.__fcabHooked) return;
         const wrapped = function (criteria) {
@@ -605,8 +833,8 @@
       },
 
       async search(criteria) {
-        const svc = win.services.Item;
-        const dto = new win.UTSearchCriteriaDTO();
+        const svc = G('services').Item;
+        const dto = new (G('UTSearchCriteriaDTO'))();
         Object.assign(dto, criteria);
         if (typeof svc.clearTransferMarketCache === 'function') svc.clearTransferMarketCache();
         let observable;
@@ -622,11 +850,11 @@
       },
 
       async buy(raw, price) {
-        return result(await observe(win.services.Item.bid(raw, price)));
+        return result(await observe(G('services').Item.bid(raw, price)));
       },
 
       async list(raw, startBid, buyNow) {
-        return result(await observe(win.services.Item.list(raw, startBid, buyNow, 3600)));
+        return result(await observe(G('services').Item.list(raw, startBid, buyNow, 3600)));
       },
     };
   }
@@ -647,6 +875,7 @@
     budget: 0,
     platform: 'ps',
     futbinMargin: 15,
+    showCardPrices: true,
   };
 
   function createStore(storage) {
@@ -682,6 +911,9 @@
   // ---------------------------------------------------------------------------
 
   const CSS = `
+.fcab-fb{position:absolute;left:50%;top:-6px;transform:translateX(-50%);z-index:5;background:#101418;color:#ffd24d;border:1px solid #ffd24d;border-radius:6px;padding:1px 5px;font:600 11px/1.3 -apple-system,system-ui,sans-serif;white-space:nowrap;pointer-events:none}
+.fcab-fb-row{position:static;transform:none;display:inline-block;margin:2px 0}
+.fcab-fb.fcab-good{background:#0f3d22;color:#4cd97b;border-color:#4cd97b}
 #fcab-toggle{position:fixed;right:12px;bottom:96px;z-index:2147483646;width:48px;height:48px;border-radius:50%;border:0;background:#1db954;color:#fff;font-size:22px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #fcab-panel{position:fixed;right:8px;bottom:8px;z-index:2147483647;width:min(380px,calc(100vw - 16px));max-height:78vh;overflow:auto;background:#15171c;color:#e8e8e8;border:1px solid #333;border-radius:12px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
 #fcab-panel[hidden]{display:none}
@@ -888,6 +1120,8 @@
       el('settings').innerHTML = '<label>Plataforma (preço do FUTBIN)</label><select data-setting="platform">' +
         '<option value="ps"' + (platform !== 'pc' ? ' selected' : '') + '>PlayStation / Xbox</option>' +
         '<option value="pc"' + (platform === 'pc' ? ' selected' : '') + '>PC</option></select>' +
+        '<label><input type="checkbox" data-setting="showCardPrices"' + (app.state.settings.showCardPrices ? ' checked' : '') +
+        '> Mostrar preço do FUTBIN em cima de cada carta</label>' +
         SETTING_FIELDS.map(([key, label]) =>
         '<label>' + label + '</label><input data-setting="' + key + '" inputmode="decimal" value="' + app.state.settings[key] + '">'
       ).join('');
@@ -1000,7 +1234,13 @@
         }
         if (a === 'add') addTarget();
         if (a === 'diagnose') {
-          const rows = adapter.diagnose().concat([['ponte FUTBIN (segundo script)', futbin.bridgeReady()]]);
+          const hooks = deps.overlay.installed();
+          const bulk = deps.prices.bulkStatus();
+          const rows = adapter.diagnose().concat([
+            ['ponte FUTBIN (segundo script)', futbin.bridgeReady()],
+            ['preço nas cartas: ' + (hooks.length ? hooks.join(', ') : 'nenhuma função de desenho encontrada'), hooks.length > 0],
+            ['FUTBIN em lote: ' + (bulk === null ? 'ainda não testado' : bulk ? 'funcionando' : 'indisponível, usando carta a carta'), bulk !== false],
+          ]);
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
         }
         if (a === 'clearHistory' && win.confirm('Apagar o histórico de compras?')) {
@@ -1036,6 +1276,11 @@
 
     panel.addEventListener('change', (e) => {
       const key = e.target.dataset.setting;
+      if (key === 'showCardPrices') {
+        app.state.settings.showCardPrices = e.target.checked;
+        save();
+        return;
+      }
       if (key === 'platform') {
         app.state.settings.platform = e.target.value === 'pc' ? 'pc' : 'ps';
         app.state.targets.forEach((t) => { t.futbin = null; });
@@ -1102,6 +1347,8 @@
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
     const futbin = Object.assign(createFutbin(bridge), { bridgeReady: bridge.isReady });
+    const prices = createPriceService(bridge, futbin);
+    const overlay = createPriceOverlay(win, prices, () => app.state.settings);
     let ui = null;
     const engine = new Autobuyer({
       adapter,
@@ -1125,14 +1372,16 @@
         ui.onTargetCard(target);
       },
     });
-    ui = createUI(win, { app, store, engine, adapter, futbin });
+    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay });
     ui.log('Painel carregado. Aguardando o Web App...');
 
     const timer = setInterval(() => {
       if (!adapter.ready()) return;
       clearInterval(timer);
       adapter.hookManualSearch((criteria, card) => ui.onCaptured(criteria, card));
+      const hooks = overlay.install();
       ui.log('Web App detectado. Pronto para usar.', 'success');
+      if (!hooks.length) ui.log('Não achei as funções que desenham as cartas; o preço do FUTBIN não vai aparecer nelas. Veja o Diagnóstico.', 'warn');
     }, 1000);
   }
 
@@ -1143,6 +1392,7 @@
     Autobuyer, createEaAdapter, createStore, DEFAULT_SETTINGS,
     baseDefId, parseShortPrice, pickFutbinHit, parseFutbinPrice, suggestPrices,
     createFutbin, createBridgeRequest, cardFromItems,
+    formatShort, createPriceService, createPriceOverlay, lookupGlobal,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

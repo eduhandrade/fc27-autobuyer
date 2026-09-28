@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.3.3
+// @version      0.3.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.3.3';
+  const SCRIPT_VERSION = '0.3.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -473,7 +473,8 @@
     return view.__root || view._root || null;
   }
 
-  function createPriceOverlay(win, prices, getSettings) {
+  function createPriceOverlay(win, prices, getSettings, onError) {
+    onError = onError || function () {};
     const installed = [];
 
     let rowSample = '';
@@ -575,7 +576,9 @@
         badge.title = 'Menor preço no FUTBIN: ' + fmt(price);
       }).catch((err) => {
         counters.failed++;
-        counters.lastError = err && err.message ? err.message : String(err);
+        const msg = err && err.message ? err.message : String(err);
+        if (msg !== counters.lastError) onError(msg);
+        counters.lastError = msg;
         if (badge.dataset.tag === tag) {
           badge.textContent = 'FUTBIN ?';
           badge.title = counters.lastError;
@@ -1024,6 +1027,8 @@
 #fcab-panel button:disabled{opacity:.4}
 #fcab-panel button.go{background:#1db954;color:#fff}
 #fcab-panel button.no{background:#c0392b;color:#fff}
+#fcab-panel .fberr{margin:0 10px 8px;padding:8px;border-radius:8px;background:#3a1d1d;color:#ffb4b4;font-size:12px;word-break:break-word}
+#fcab-panel .fberr[hidden]{display:none}
 #fcab-panel .stats{padding:8px 10px;font-size:12px;color:#aaa;display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
 #fcab-panel .stats b{color:#fff;display:block;font-size:14px}
 #fcab-panel .tabs{display:flex;gap:4px;padding:0 10px 8px}
@@ -1091,6 +1096,7 @@
         <button data-act="close">✕</button>
       </div>
       <div class="stats" data-el="stats"></div>
+      <div class="fberr" data-el="fberr" hidden></div>
       <div class="tabs">
         <button data-tab="targets">Alvos</button>
         <button data-tab="settings">Config</button>
@@ -1141,7 +1147,16 @@
       if (tab === 'history') renderHistory();
     }
 
+    function renderFutbinError() {
+      const box = el('fberr');
+      const c = deps.overlay && deps.overlay.counters();
+      const msg = c && c.lastError;
+      box.hidden = !msg;
+      if (msg) box.textContent = '⚠️ FUTBIN não respondeu direito: ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
+    }
+
     function renderStatus() {
+      renderFutbinError();
       const colors = { rodando: '#1db954', pausado: '#f5c542', parado: '#777' };
       panel.querySelector('.dot').style.background = colors[engine.status] || '#777';
       let text = engine.status.charAt(0).toUpperCase() + engine.status.slice(1);
@@ -1454,7 +1469,9 @@
     const bridge = createBridgeRequest(win);
     const futbin = Object.assign(createFutbin(bridge), { bridgeReady: bridge.isReady });
     const prices = createPriceService(bridge, futbin);
-    const overlay = createPriceOverlay(win, prices, () => app.state.settings);
+    const overlay = createPriceOverlay(win, prices, () => app.state.settings, (msg) => {
+      if (ui) ui.log('FUTBIN: ' + msg, 'error');
+    });
     let ui = null;
     const engine = new Autobuyer({
       adapter,

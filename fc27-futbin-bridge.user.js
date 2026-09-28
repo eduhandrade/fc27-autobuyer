@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         FC27 Autobuyer - ponte FUTBIN
 // @namespace    fc27-autobuyer
-// @version      0.3.0
+// @version      0.3.1
 // @description  Permite que o FC27 Autobuyer consulte preços no FUTBIN
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        GM.xmlHttpRequest
 // @grant        GM_xmlhttpRequest
 // @connect      www.futbin.com
 // @inject-into  content
+// @updateURL    https://raw.githubusercontent.com/eduhandrade/fc27-autobuyer/main/fc27-futbin-bridge.user.js
+// @downloadURL  https://raw.githubusercontent.com/eduhandrade/fc27-autobuyer/main/fc27-futbin-bridge.user.js
 // @run-at       document-start
 // ==/UserScript==
 

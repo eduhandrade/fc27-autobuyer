@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.3.0
+// @version      0.3.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
 // @inject-into  page
+// @updateURL    https://raw.githubusercontent.com/eduhandrade/fc27-autobuyer/main/fc27-autobuyer.user.js
+// @downloadURL  https://raw.githubusercontent.com/eduhandrade/fc27-autobuyer/main/fc27-autobuyer.user.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -456,16 +458,32 @@
   function createPriceOverlay(win, prices, getSettings) {
     const installed = [];
 
+    let rowSample = '';
+
+    // Nas linhas de lista, a etiqueta vai ao lado do preço (mercado) ou do
+    // nome do jogador (clube). Sobre a carta ela seria cortada pela borda.
+    function rowSpot(root) {
+      const auction = root.querySelector('.auction');
+      if (auction) return { parent: auction, before: null, mode: 'inline' };
+      const name = root.querySelector('.name, .player-name, [class*="name"]:not(.fcab-fb)');
+      if (name && name.parentNode) return { parent: name.parentNode, before: name.nextSibling, mode: 'inline' };
+      return { parent: root, before: null, mode: 'corner' };
+    }
+
     function badgeFor(root, kind) {
       let badge = root.querySelector('.fcab-fb');
       if (!badge) {
         badge = win.document.createElement('div');
-        badge.className = 'fcab-fb fcab-fb-' + kind;
-        const spot = (kind === 'row' && root.querySelector('.auction')) || root;
-        spot.appendChild(badge);
+        let spot = { parent: root, before: null, mode: 'card' };
+        if (kind === 'row') {
+          spot = rowSpot(root);
+          if (!rowSample) rowSample = describeDom(root);
+        }
+        badge.className = 'fcab-fb fcab-fb-' + spot.mode;
+        spot.parent.insertBefore(badge, spot.before);
         // A carta costuma ser desenhada antes de entrar na tela; só dá para
         // conferir o posicionamento depois que ela aparece.
-        if (spot === root) {
+        if (spot.parent === root) {
           const fix = () => {
             if (root.isConnected && win.getComputedStyle(root).position === 'static') root.style.position = 'relative';
           };
@@ -517,7 +535,19 @@
         return installed.map((h) => h[0] + '.' + h[1]);
       },
       installed: () => installed.map((h) => h[0] + '.' + h[1]),
+      rowSample: () => rowSample,
     };
+  }
+
+  // Resumo da estrutura de uma linha, mostrado no Diagnóstico para ajustar a
+  // posição da etiqueta se a EA mudar o layout.
+  function describeDom(el, depth) {
+    depth = depth || 0;
+    if (!el || !el.tagName || depth > 3) return '';
+    const cls = (el.className && typeof el.className === 'string') ? '.' + el.className.trim().split(/\s+/).join('.') : '';
+    const kids = Array.from(el.children || []).filter((c) => !c.classList.contains('fcab-fb')).slice(0, 6)
+      .map((c) => describeDom(c, depth + 1)).filter(Boolean);
+    return el.tagName.toLowerCase() + cls + (kids.length ? ' > [' + kids.join(', ') + ']' : '');
   }
 
   function itemNameOf(raw) {
@@ -911,8 +941,10 @@
   // ---------------------------------------------------------------------------
 
   const CSS = `
-.fcab-fb{position:absolute;left:50%;top:-6px;transform:translateX(-50%);z-index:5;background:#101418;color:#ffd24d;border:1px solid #ffd24d;border-radius:6px;padding:1px 5px;font:600 11px/1.3 -apple-system,system-ui,sans-serif;white-space:nowrap;pointer-events:none}
-.fcab-fb-row{position:static;transform:none;display:inline-block;margin:2px 0}
+.fcab-fb{z-index:5;background:#101418;color:#ffd24d;border:1px solid #ffd24d;border-radius:6px;padding:2px 7px;font:700 13px/1.3 -apple-system,system-ui,sans-serif;white-space:nowrap;pointer-events:none}
+.fcab-fb-card{position:absolute;left:50%;top:2px;transform:translateX(-50%);font-size:11px;padding:1px 5px}
+.fcab-fb-inline{position:static;display:inline-block;margin:4px 0 4px 8px;vertical-align:middle}
+.fcab-fb-corner{position:absolute;top:8px;right:44px}
 .fcab-fb.fcab-good{background:#0f3d22;color:#4cd97b;border-color:#4cd97b}
 #fcab-toggle{position:fixed;right:12px;bottom:96px;z-index:2147483646;width:48px;height:48px;border-radius:50%;border:0;background:#1db954;color:#fff;font-size:22px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #fcab-panel{position:fixed;right:8px;bottom:8px;z-index:2147483647;width:min(380px,calc(100vw - 16px));max-height:78vh;overflow:auto;background:#15171c;color:#e8e8e8;border:1px solid #333;border-radius:12px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
@@ -1239,6 +1271,7 @@
           const rows = adapter.diagnose().concat([
             ['ponte FUTBIN (segundo script)', futbin.bridgeReady()],
             ['preço nas cartas: ' + (hooks.length ? hooks.join(', ') : 'nenhuma função de desenho encontrada'), hooks.length > 0],
+            ['linha: ' + (deps.overlay.rowSample() || 'nenhuma lista vista ainda').slice(0, 400), true],
             ['FUTBIN em lote: ' + (bulk === null ? 'ainda não testado' : bulk ? 'funcionando' : 'indisponível, usando carta a carta'), bulk !== false],
           ]);
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');

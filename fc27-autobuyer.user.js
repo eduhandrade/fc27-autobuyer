@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.3.2
+// @version      0.3.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.3.2';
+  const SCRIPT_VERSION = '0.3.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -278,11 +278,12 @@
         if (hit && now() - hit.at < FUTBIN_MAX_AGE) return hit;
         const searchUrl = FUTBIN_BASE + '/players/search?targetPage=PLAYER_PAGE&query=' +
           encodeURIComponent(card.name) + '&year=' + FUTBIN_YEAR + '&evolutions=false';
+        const body = await request(searchUrl);
         let hits;
         try {
-          hits = JSON.parse(await request(searchUrl));
+          hits = JSON.parse(body);
         } catch (e) {
-          throw new Error(e instanceof SyntaxError ? 'resposta inesperada do FUTBIN' : e.message);
+          throw new Error('resposta inesperada do FUTBIN na busca: "' + snippet(body) + '"');
         }
         const found = pickFutbinHit(hits, card);
         if (!found) throw new Error(card.name + ' não encontrado no FUTBIN');
@@ -294,6 +295,10 @@
         return result;
       },
     };
+  }
+
+  function snippet(text) {
+    return String(text == null ? '' : text).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
   }
 
   // A página da EA não pode ler o futbin.com direto (bloqueio do navegador).
@@ -349,6 +354,7 @@
     let queue = [];
     let timer = null;
     let bulkWorks = null;
+    let bulkError = '';
 
     function bulkUrl(ids) {
       return FUTBIN_BASE + '/' + FUTBIN_YEAR + '/playerPrices?player=' + ids[0] +
@@ -364,7 +370,13 @@
 
     async function tryBulk(jobs, platform) {
       const ids = jobs.map((j) => j.card.definitionId);
-      const data = JSON.parse(await request(bulkUrl(ids)));
+      const body = await request(bulkUrl(ids));
+      let data;
+      try {
+        data = JSON.parse(body);
+      } catch (e) {
+        throw new Error('resposta inesperada: "' + snippet(body) + '"');
+      }
       const left = [];
       for (const j of jobs) {
         const entry = data && data[j.card.definitionId];
@@ -403,7 +415,10 @@
               bulkWorks = true;
               await perCard(rest, platform);
             } catch (err) {
-              if (bulkWorks === null) bulkWorks = false;
+              if (bulkWorks === null) {
+                bulkWorks = false;
+                bulkError = err && err.message ? err.message : String(err);
+              }
               await perCard(chunk, platform);
             }
           }
@@ -428,6 +443,7 @@
         });
       },
       bulkStatus: () => bulkWorks,
+      bulkError: () => bulkError,
     };
   }
 
@@ -464,12 +480,13 @@
     const counters = { calls: 0, badges: 0, priced: 0, failed: 0, lastError: '' };
 
     // Elemento que mostra exatamente o nome do jogador (ex.: "Hazard").
-    function findNameElement(root, name) {
+    function findNameElement(root, name, exclude) {
       const target = String(name || '').trim().toLowerCase();
       if (!target) return null;
       const all = root.querySelectorAll('*');
       for (const el of all) {
         if (el.classList.contains('fcab-fb')) continue;
+        if (exclude && exclude.contains(el)) continue;
         const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim().toLowerCase();
         if (own === target) return el;
       }
@@ -486,8 +503,27 @@
       return { parent: root, before: null, mode: 'corner' };
     }
 
+    const badges = new WeakMap();
+
+    // Carta pequena dentro de uma linha (ex.: lista do clube): a etiqueta
+    // sobre a miniatura fica cortada, então vai para o lado do nome na linha.
+    function moveNextToRowName(root, badge, name) {
+      let node = root.parentElement;
+      for (let depth = 0; node && depth < 5; depth++, node = node.parentElement) {
+        const nameEl = findNameElement(node, name, root);
+        if (nameEl && nameEl.parentNode) {
+          nameEl.parentNode.insertBefore(badge, nameEl.nextSibling);
+          badge.className = badge.className.replace('fcab-fb-card', 'fcab-fb-inline');
+          if (!rowSample) rowSample = 'carta na linha | ' + describeDom(node);
+          return true;
+        }
+      }
+      return false;
+    }
+
     function badgeFor(root, kind, name) {
-      let badge = root.querySelector('.fcab-fb');
+      let badge = badges.get(root);
+      if (badge && !badge.isConnected && !root.contains(badge)) badge = null;
       if (!badge) {
         badge = win.document.createElement('div');
         let spot = { parent: root, before: null, mode: 'card' };
@@ -498,13 +534,19 @@
         counters.badges++;
         badge.className = 'fcab-fb fcab-fb-' + spot.mode;
         spot.parent.insertBefore(badge, spot.before);
+        badges.set(root, badge);
         // A carta costuma ser desenhada antes de entrar na tela; só dá para
         // conferir o posicionamento depois que ela aparece.
         if (spot.parent === root) {
+          let tries = 0;
           const fix = () => {
-            if (root.isConnected && win.getComputedStyle(root).position === 'static') root.style.position = 'relative';
+            if (!root.isConnected) {
+              if (++tries < 20) setTimeout(fix, 100);
+              return;
+            }
+            if (spot.mode === 'card' && moveNextToRowName(root, badge, name)) return;
+            if (win.getComputedStyle(root).position === 'static') root.style.position = 'relative';
           };
-          fix();
           (win.requestAnimationFrame || setTimeout)(fix);
         }
       }
@@ -534,7 +576,10 @@
       }).catch((err) => {
         counters.failed++;
         counters.lastError = err && err.message ? err.message : String(err);
-        if (badge.dataset.tag === tag) badge.textContent = 'FUTBIN ?';
+        if (badge.dataset.tag === tag) {
+          badge.textContent = 'FUTBIN ?';
+          badge.title = counters.lastError;
+        }
       });
     }
 
@@ -1299,7 +1344,7 @@
               return ['cartas desenhadas: ' + c.calls + ', etiquetas: ' + c.badges + ', com preço: ' + c.priced +
                 ', falhas: ' + c.failed + (c.lastError ? ' (último erro: ' + c.lastError + ')' : ''), c.failed === 0];
             })(),
-            ['FUTBIN em lote: ' + (bulk === null ? 'ainda não testado' : bulk ? 'funcionando' : 'indisponível, usando carta a carta'), bulk !== false],
+            ['FUTBIN em lote: ' + (bulk === null ? 'ainda não testado' : bulk ? 'funcionando' : 'indisponível (' + deps.prices.bulkError() + '), usando carta a carta'), bulk !== false],
           ]);
           rows.unshift(['versão do script: ' + SCRIPT_VERSION, true]);
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');

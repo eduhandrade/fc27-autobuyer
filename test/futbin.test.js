@@ -78,7 +78,7 @@ test('cliente FUTBIN explica quando não acha a carta', async () => {
   const fb = ab.createFutbin(async () => '[]');
   await assert.rejects(fb.price({ name: 'X', definitionId: 1, rating: 50 }, 'ps'), /não encontrado no FUTBIN/);
   const bad = ab.createFutbin(async () => '<html>captcha</html>');
-  await assert.rejects(bad.price({ name: 'X', definitionId: 1, rating: 50 }, 'ps'), /resposta inesperada/);
+  await assert.rejects(bad.price({ name: 'X', definitionId: 1, rating: 50 }, 'ps'), /resposta inesperada do FUTBIN/);
 });
 
 // Página e ponte conversam por eventos no window, como no navegador.

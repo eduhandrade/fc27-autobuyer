@@ -5,7 +5,7 @@ const ab = require('../fc27-autobuyer.user.js');
 const FAST = { delayMin: 0, delayMax: 0, pauseEvery: 0, pauseMinutes: 0, maxSearches: 0, maxBuys: 0, budget: 0 };
 
 function item(tradeId, buyNow) {
-  return { tradeId, buyNow, name: 'Jogador ' + tradeId, raw: { tradeId } };
+  return { tradeId, buyNow, name: 'Jogador ' + tradeId, kind: 'player', raw: { tradeId } };
 }
 
 // Adaptador falso: cada busca devolve a próxima resposta da fila.
@@ -45,7 +45,7 @@ function engine(adapter, settings, targets, purchases = []) {
 }
 
 const target = (extra) => Object.assign({
-  id: 't', name: 'Alvo', criteria: { type: 'player', maskedDefId: 99 }, maxBuy: 10000, sellPrice: 0, enabled: true,
+  id: 't', name: 'Alvo', kind: 'player', criteria: { type: 'player', maskedDefId: 99 }, maxBuy: 10000, sellPrice: 0, enabled: true,
 }, extra);
 
 test('compra a carta barata e revende pelo preço configurado', async () => {
@@ -115,9 +115,9 @@ test('respeita o orçamento da sessão', async () => {
 test('alterna entre os alvos ativos e ignora os desativados', async () => {
   const adapter = fakeAdapter({ searches: [{ success: true, status: 200, items: [] }] });
   const targets = [
-    target({ id: 'a', criteria: { maskedDefId: 1 } }),
-    target({ id: 'b', criteria: { maskedDefId: 2 }, enabled: false }),
-    target({ id: 'c', criteria: { maskedDefId: 3 } }),
+    target({ id: 'a', criteria: { type: 'player', maskedDefId: 1 } }),
+    target({ id: 'b', criteria: { type: 'player', maskedDefId: 2 }, enabled: false }),
+    target({ id: 'c', criteria: { type: 'player', maskedDefId: 3 } }),
   ];
   const e = engine(adapter, { maxSearches: 4 }, targets);
   await e.start();

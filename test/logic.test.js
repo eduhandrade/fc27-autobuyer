@@ -41,12 +41,12 @@ test('busca manual é copiada sem os campos de preço', () => {
 
 test('escolhe a carta mais barata que cabe no preço, moedas e orçamento', () => {
   const items = [
-    { tradeId: 1, buyNow: 900 },
-    { tradeId: 2, buyNow: 700 },
-    { tradeId: 3, buyNow: 1200 },
-    { tradeId: 4, buyNow: 500 },
+    { tradeId: 1, buyNow: 900, kind: 'player' },
+    { tradeId: 2, buyNow: 700, kind: 'player' },
+    { tradeId: 3, buyNow: 1200, kind: 'player' },
+    { tradeId: 4, buyNow: 500, kind: 'player' },
   ];
-  const target = { maxBuy: 1000 };
+  const target = { kind: 'player', criteria: { type: 'player', maskedDefId: 1 }, maxBuy: 1000 };
   assert.equal(ab.pickCandidate(items, target, {}).tradeId, 4);
   assert.equal(ab.pickCandidate(items, target, { seen: new Set([4]) }).tradeId, 2);
   assert.equal(ab.pickCandidate(items, target, { coins: 600 }).tradeId, 4);

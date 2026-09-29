@@ -29,7 +29,12 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
    - **Preço máximo de compra**: o bot só compra por esse valor ou menos.
    - **Preço de revenda** (opcional): se preenchido, a carta é listada automaticamente por esse preço (duração de 1h).
    - Com a ponte instalada, o painel mostra o **preço do FUTBIN** da carta e já preenche uma sugestão: compra até o FUTBIN menos a margem (padrão 15%) e revenda pelo preço do FUTBIN.
-   - **Filtros:** no "Novo alvo" e no botão **✎ Filtros** de cada alvo dá para escolher posição, **estilo de química** (nomes do jogo), nível, clube, liga, país e nota mínima/máxima. Não precisa escolher jogador: "qualquer CB Shadow do clube X até 5.000" funciona. Clube, liga e país usam o ID da EA; escolhendo pelo nome na busca do Web App, o ID é preenchido sozinho. Antes de comprar, o bot confere química, clube, liga, país e nota da carta.
+   - **Tipo do alvo (obrigatório):** *Jogador* ou *Consumível: estilo de química*. O tipo vem da busca capturada quando dá para reconhecer; se não der, você escolhe. O script nunca assume "jogador".
+     - **Consumível:** só escolhe o estilo (ex.: Shadow). Compra apenas a carta de consumível; jogadores são sempre ignorados.
+     - **Jogador:** posição, química aplicada no jogador, nível, time/clube, liga, país e nota mínima/máxima. Ex.: CB + Shadow = zagueiro com Shadow. Time, liga e país usam o ID da EA; escolhendo pelo nome na busca do Web App, o ID vem preenchido.
+   - **Conferência antes de comprar:** o bot confere o tipo do item e cada filtro (posição, química, time, liga, país, nota). Se não conseguir confirmar algum, **não compra** e registra no Log o motivo ("Pulei ...: não é consumível").
+   - **Modo simulação (ligado por padrão):** o bot procura mas não compra; o Log mostra "SIMULAÇÃO: compraria ...". Confira e desligue em Config.
+   - Alvos criados antes da versão 0.6 ficam desligados até você revisar e salvar em ✎ Filtros.
 2. Revise a aba **Config**: plataforma (PlayStation/Xbox ou PC), margem do FUTBIN: esperas, pausas e limites.
 3. Toque em **Iniciar**. Acompanhe pelas abas **Log** e **Compras**.
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.5.0
+// @version      0.6.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.5.0';
+  const SCRIPT_VERSION = '0.6.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -72,18 +72,33 @@
   // Campos que o próprio bot controla; não são copiados da busca manual.
   const CONTROLLED_KEYS = ['minBid', 'maxBid', 'minBuy', 'maxBuy', 'offset', 'count'];
 
+  // Campos da busca que precisam ser lidos mesmo quando o objeto da EA os guarda
+  // como getter ou com "_" na frente. O tipo (jogador x consumível) é o mais
+  // importante: sem ele, uma busca de consumível viraria busca de jogador.
+  const KNOWN_CRITERIA_KEYS = ['type', 'category', 'playStyle', 'position', 'zone', 'level', 'rarities',
+    'nation', 'league', 'club', 'maskedDefId', 'defId'];
+
+  function plainValue(value) {
+    const t = typeof value;
+    if (t === 'number' || t === 'string' || t === 'boolean') return value;
+    if (Array.isArray(value) && value.every((v) => typeof v !== 'object' && typeof v !== 'function')) return value.slice();
+    return undefined;
+  }
+
   function serializeCriteria(criteria) {
     const out = {};
     if (!criteria) return out;
     for (const key of Object.keys(criteria)) {
       if (CONTROLLED_KEYS.includes(key)) continue;
-      const value = criteria[key];
-      const t = typeof value;
-      if (t === 'number' || t === 'string' || t === 'boolean') {
-        out[key] = value;
-      } else if (Array.isArray(value) && value.every((v) => typeof v !== 'object' && typeof v !== 'function')) {
-        out[key] = value.slice();
-      }
+      const value = plainValue(criteria[key]);
+      if (value !== undefined) out[key] = value;
+    }
+    for (const key of KNOWN_CRITERIA_KEYS) {
+      if (out[key] !== undefined) continue;
+      let value;
+      try { value = plainValue(criteria[key]); } catch (e) { value = undefined; }
+      if (value === undefined) value = plainValue(criteria['_' + key]);
+      if (value !== undefined) out[key] = value;
     }
     return out;
   }
@@ -109,6 +124,12 @@
   // Filtros extras. Posição, nível e estilo de química têm nomes conhecidos;
   // clube, liga e país usam o ID da EA (a busca do Web App preenche sozinha).
   const POSITIONS = ['GK', 'RB', 'LB', 'CB', 'CDM', 'CM', 'CAM', 'RM', 'LM', 'RW', 'LW', 'ST'];
+  // Posições numéricas usadas internamente pela EA.
+  const POSITION_IDS = {
+    0: 'GK', 1: 'SW', 2: 'RWB', 3: 'RB', 4: 'RCB', 5: 'CB', 6: 'LCB', 7: 'LB', 8: 'LWB', 9: 'RDM',
+    10: 'CDM', 11: 'LDM', 12: 'RM', 13: 'RCM', 14: 'CM', 15: 'LCM', 16: 'LM', 17: 'RAM', 18: 'CAM',
+    19: 'LAM', 20: 'RF', 21: 'CF', 22: 'LF', 23: 'RW', 24: 'RS', 25: 'ST', 26: 'LS', 27: 'LW',
+  };
   const LEVELS = [['bronze', 'Bronze'], ['silver', 'Prata'], ['gold', 'Ouro'], ['SP', 'Especial']];
   const DEFAULT_CHEM_STYLES = {
     250: 'Basic', 251: 'Sniper', 252: 'Finisher', 253: 'Deadeye', 254: 'Marksman', 255: 'Hawk',
@@ -136,47 +157,143 @@
   }
 
   function chemStyleName(id) {
-    return chemStyles[id] || ('estilo #' + id);
+    return chemStyles[id] || DEFAULT_CHEM_STYLES[id] || ('estilo #' + id);
   }
 
-  const FILTER_KEYS = ['position', 'playStyle', 'level', 'club', 'league', 'nation'];
+  function normalizeName(s) {
+    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+  }
 
-  // Aplica os valores do editor sobre os critérios: vazio/"qualquer" remove o filtro.
-  function applyFilterValues(criteria, values) {
-    const out = Object.assign({}, criteria);
-    for (const key of FILTER_KEYS) {
-      const v = values[key];
-      const empty = v == null || v === '' || v === 'any' || v === 0 || v === '0';
-      if (empty) delete out[key];
-      else out[key] = ['playStyle', 'club', 'league', 'nation'].includes(key) ? parseInt(v, 10) : v;
+  function isChemStyleName(name, id) {
+    const n = normalizeName(name);
+    return !!n && [chemStyles[id], DEFAULT_CHEM_STYLES[id]].some((x) => x && normalizeName(x) === n);
+  }
+
+  // Tipo do alvo: define o que a busca procura e o que o bot aceita comprar.
+  const KINDS = [['player', 'Jogador'], ['chemstyle', 'Consumível: estilo de química']];
+
+  function kindLabel(kind) {
+    return (KINDS.find((k) => k[0] === kind) || [null, 'tipo não definido'])[1];
+  }
+
+  // Tipo a partir da busca capturada do Web App. Na dúvida devolve null e o
+  // usuário escolhe; nunca assume "jogador".
+  function kindFromCriteria(c) {
+    if (!c) return null;
+    const type = String(c.type || '').toLowerCase();
+    const category = String(c.category || '').toLowerCase();
+    if (type === 'player') return 'player';
+    if (/playstyle|chem/.test(category)) return 'chemstyle';
+    if (type === 'training' && c.playStyle > 0) return 'chemstyle';
+    return null;
+  }
+
+  const PLAYER_FILTER_KEYS = ['position', 'playStyle', 'level', 'club', 'league', 'nation'];
+  const PLAYER_ONLY_KEYS = ['position', 'zone', 'level', 'club', 'league', 'nation', 'maskedDefId', 'defId', 'rarities'];
+  const NUMERIC_KEYS = ['playStyle', 'club', 'league', 'nation'];
+
+  function isEmptyValue(v) {
+    return v == null || v === '' || v === 'any' || v === 0 || v === '0' || v === -1;
+  }
+
+  // Monta os critérios da busca para o tipo escolhido. Só reaproveita a busca
+  // capturada quando ela é do mesmo tipo.
+  function criteriaForKind(kind, base, values) {
+    base = base || {};
+    if (kind === 'chemstyle') {
+      const style = parseInt(values.playStyle, 10);
+      const out = kindFromCriteria(base) === 'chemstyle'
+        ? Object.assign({}, base)
+        : { type: 'training', category: 'playStyle' };
+      PLAYER_ONLY_KEYS.forEach((k) => { delete out[k]; });
+      if (style > 0) out.playStyle = style;
+      else delete out.playStyle;
+      return out;
     }
-    if (!out.type) out.type = 'player';
-    return out;
+    if (kind === 'player') {
+      const out = kindFromCriteria(base) === 'player' ? Object.assign({}, base) : {};
+      delete out.category;
+      for (const key of PLAYER_FILTER_KEYS) {
+        const v = values[key];
+        if (isEmptyValue(v)) delete out[key];
+        else out[key] = NUMERIC_KEYS.includes(key) ? parseInt(v, 10) : v;
+      }
+      out.type = 'player';
+      return out;
+    }
+    return Object.assign({}, base);
   }
 
-  function hasAnyFilter(criteria, target) {
-    const c = criteria || {};
+  function hasPlayerFilter(c, target) {
+    c = c || {};
     return !!(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length) ||
-      FILTER_KEYS.some((k) => c[k] != null && c[k] !== 'any' && c[k] !== -1) ||
+      PLAYER_FILTER_KEYS.some((k) => !isEmptyValue(c[k])) ||
       (Array.isArray(c.rarities) && c.rarities.length) ||
       (target && (target.minRating > 0 || target.maxRating > 0)));
   }
 
-  // Confere a carta antes de comprar, caso a busca da EA traga algo fora do filtro.
-  function matchesFilters(it, target) {
+  // Motivo para não aceitar o alvo, ou null se está tudo certo.
+  function targetProblem(t) {
+    if (!t || !KINDS.some((k) => k[0] === t.kind)) return 'escolha o tipo do alvo (jogador ou consumível)';
+    const c = t.criteria || {};
+    if (t.kind === 'chemstyle') {
+      if (!(c.playStyle > 0)) return 'escolha qual estilo de química (consumível) comprar';
+      if (kindFromCriteria(c) !== 'chemstyle') return 'a busca não é de consumível';
+    }
+    if (t.kind === 'player') {
+      if (kindFromCriteria(c) !== 'player') return 'a busca não é de jogador';
+      if (!hasPlayerFilter(c, t)) return 'escolha um jogador ou pelo menos um filtro';
+    }
+    if (!(t.maxBuy >= 200)) return 'preço máximo de compra precisa ser pelo menos 200';
+    return null;
+  }
+
+  function positionsOf(it) {
+    const list = [];
+    const add = (p) => {
+      const name = typeof p === 'number' ? POSITION_IDS[p] : p;
+      if (typeof name === 'string' && name) list.push(name.toUpperCase());
+    };
+    add(it.position);
+    (it.positions || []).forEach(add);
+    return list;
+  }
+
+  // Confere a carta antes de comprar. Devolve o motivo para NÃO comprar, ou
+  // null. Na dúvida (dado que o item não informa), não compra.
+  function mismatchReason(it, target) {
     const c = target.criteria || {};
-    const differs = (want, got) => want > 0 && got != null && got !== want;
-    if (differs(c.playStyle, it.playStyle)) return false;
-    if (differs(c.club, it.teamId)) return false;
-    if (differs(c.league, it.leagueId)) return false;
-    if (differs(c.nation, it.nationId)) return false;
-    if (target.minRating > 0 && it.rating != null && it.rating < target.minRating) return false;
-    if (target.maxRating > 0 && it.rating != null && it.rating > target.maxRating) return false;
-    return true;
+    if (target.kind === 'chemstyle') {
+      if (it.kind !== 'training') return 'não é consumível';
+      if (it.playStyle != null && it.playStyle > 0) return it.playStyle === c.playStyle ? null : 'estilo de química diferente';
+      return isChemStyleName(it.name, c.playStyle) ? null : 'não deu para confirmar o estilo do consumível';
+    }
+    if (target.kind === 'player') {
+      if (it.kind !== 'player') return 'não é jogador';
+      const need = (want, got, label) => {
+        if (isEmptyValue(want)) return null;
+        if (got == null) return 'não deu para confirmar ' + label;
+        return got === want ? null : label + ' diferente';
+      };
+      if (!isEmptyValue(c.position)) {
+        const pos = positionsOf(it);
+        if (!pos.length) return 'não deu para confirmar a posição';
+        if (!pos.includes(String(c.position).toUpperCase())) return 'posição diferente';
+      }
+      return need(c.playStyle, it.playStyle, 'a química') ||
+        need(c.club, it.teamId, 'o clube') ||
+        need(c.league, it.leagueId, 'a liga') ||
+        need(c.nation, it.nationId, 'o país') ||
+        (target.minRating > 0 && !(it.rating >= target.minRating) ? 'nota abaixo do mínimo' : null) ||
+        (target.maxRating > 0 && !(it.rating <= target.maxRating) ? 'nota acima do máximo' : null);
+    }
+    return 'alvo sem tipo definido';
   }
 
   function describeTarget(t) {
-    let text = describeCriteria(t.criteria);
+    const c = t.criteria || {};
+    if (t.kind === 'chemstyle') return 'CONSUMÍVEL · estilo ' + (c.playStyle > 0 ? chemStyleName(c.playStyle) : '?');
+    let text = (t.kind === 'player' ? 'JOGADOR · ' : 'TIPO NÃO DEFINIDO · ') + describeCriteria(c);
     if (t.minRating > 0 || t.maxRating > 0) {
       text += ' · nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?');
     }
@@ -188,15 +305,23 @@
     const parts = [];
     if (c.maskedDefId) parts.push('jogador ' + c.maskedDefId);
     if (Array.isArray(c.defId) && c.defId.length) parts.push('carta ' + c.defId.join(','));
-    if (c.playStyle > 0) parts.push('química ' + chemStyleName(c.playStyle));
+    if (c.playStyle > 0) parts.push((kindFromCriteria(c) === 'chemstyle' ? 'estilo ' : 'com química ') + chemStyleName(c.playStyle));
     if (c.level && c.level !== 'any') parts.push('nível ' + ((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level));
     if (Array.isArray(c.rarities) && c.rarities.length) parts.push('raridade ' + c.rarities.join(','));
     if (c.position && c.position !== 'any') parts.push('posição ' + c.position);
     if (c.league > 0) parts.push('liga ' + c.league);
     if (c.nation > 0) parts.push('país ' + c.nation);
     if (c.club > 0) parts.push('clube ' + c.club);
-    if (!parts.length && c.type) parts.push('tipo ' + c.type);
-    return parts.join(' · ') || 'busca sem filtros';
+    return parts.join(' · ') || 'sem filtros';
+  }
+
+  function describeItem(it) {
+    if (it.kind === 'training') return 'consumível ' + it.name;
+    const extra = [];
+    if (it.playStyle > 0) extra.push('química ' + chemStyleName(it.playStyle));
+    const pos = positionsOf(it)[0];
+    if (pos) extra.push(pos);
+    return it.name + (it.rating ? ' ' + it.rating : '') + (extra.length ? ' (' + extra.join(', ') + ')' : '');
   }
 
   // ---------------------------------------------------------------------------
@@ -206,14 +331,17 @@
   function pickCandidate(items, target, ctx) {
     const coins = ctx.coins == null ? Infinity : ctx.coins;
     const budgetLeft = ctx.budgetLeft == null ? Infinity : ctx.budgetLeft;
-    const eligible = items.filter((it) =>
-      it.buyNow > 0 &&
-      it.buyNow <= target.maxBuy &&
-      it.buyNow <= coins &&
-      it.buyNow <= budgetLeft &&
-      matchesFilters(it, target) &&
-      !(ctx.seen && ctx.seen.has(it.tradeId))
-    );
+    const eligible = [];
+    for (const it of items) {
+      if (!(it.buyNow > 0) || it.buyNow > target.maxBuy || it.buyNow > coins || it.buyNow > budgetLeft) continue;
+      if (ctx.seen && ctx.seen.has(it.tradeId)) continue;
+      const reason = mismatchReason(it, target);
+      if (reason) {
+        if (ctx.onSkip) ctx.onSkip(it, reason);
+        continue;
+      }
+      eligible.push(it);
+    }
     eligible.sort((a, b) => a.buyNow - b.buyNow);
     return eligible[0] || null;
   }
@@ -804,13 +932,13 @@
   }
 
   function cardFromItems(items) {
-    const it = items && items[0];
+    const it = (items || []).find((x) => x.kind == null || x.kind === 'player');
     if (!it || !it.definitionId) return null;
     return { name: it.name, definitionId: it.definitionId, rating: it.rating };
   }
 
   function emptyStats() {
-    return { searches: 0, buys: 0, spent: 0, listed: 0, missed: 0, errors: 0, profit: 0 };
+    return { searches: 0, buys: 0, spent: 0, listed: 0, missed: 0, errors: 0, profit: 0, skipped: 0, simulated: 0 };
   }
 
   class Autobuyer {
@@ -827,6 +955,8 @@
       this.stopReason = '';
       this.stats = emptyStats();
       this.seen = new Set();
+      this.skipped = new Set();
+      this.warned = new Set();
       this.targetIndex = 0;
       this.busterIndex = 0;
       this.consecutiveErrors = 0;
@@ -838,10 +968,14 @@
       this.running = true;
       this.stats = emptyStats();
       this.seen.clear();
+      this.skipped = new Set();
+      this.warned = new Set();
       this.consecutiveErrors = 0;
       this.stopReason = '';
       this.setStatus('rodando');
-      this.log('Bot iniciado.');
+      this.log(this.getState().settings.dryRun
+        ? 'Bot iniciado em MODO SIMULAÇÃO: nada será comprado.'
+        : 'Bot iniciado. Compras de verdade ligadas.');
       this.loopPromise = this.loop();
       return this.loopPromise;
     }
@@ -902,8 +1036,16 @@
       const limit = checkLimits(this.stats, s);
       if (limit) return this.stop(limit);
 
-      const active = state.targets.filter((t) => t.enabled);
-      if (!active.length) return this.stop('nenhum alvo ativo');
+      const active = state.targets.filter((t) => {
+        if (!t.enabled) return false;
+        const problem = targetProblem(t);
+        if (problem && !this.warned.has(t.id)) {
+          this.warned.add(t.id);
+          this.log('Alvo "' + t.name + '" ignorado: ' + problem + '.', 'error');
+        }
+        return !problem;
+      });
+      if (!active.length) return this.stop('nenhum alvo válido e ativo');
       const target = active[this.targetIndex++ % active.length];
 
       const res = await this.adapter.search(buildCriteria(target, this.busterIndex++));
@@ -919,12 +1061,26 @@
         coins: this.adapter.getCoins(),
         seen: this.seen,
         budgetLeft,
+        onSkip: (it, reason) => {
+          if (this.skipped.has(it.tradeId)) return;
+          this.skipped.add(it.tradeId);
+          this.stats.skipped++;
+          this.log('Pulei ' + describeItem(it) + ' por ' + fmt(it.buyNow) + ': ' + reason + '.', 'warn');
+        },
       });
       if (!item) return;
       this.seen.add(item.tradeId);
 
+      if (s.dryRun) {
+        this.stats.simulated++;
+        this.log('SIMULAÇÃO: compraria ' + describeItem(item) + ' por ' + fmt(item.buyNow) +
+          ' (' + target.name + '). Nada foi comprado.', 'success');
+        this.onChange();
+        return;
+      }
+
       const ref = target.futbin && target.futbin.price ? ', FUTBIN ' + fmt(target.futbin.price) : '';
-      this.log('Achei ' + item.name + ' por ' + fmt(item.buyNow) + ' (' + target.name + ref + '). Comprando...');
+      this.log('Achei ' + describeItem(item) + ' por ' + fmt(item.buyNow) + ' (' + target.name + ref + '). Comprando...');
       const buy = await this.adapter.buy(item.raw, item.buyNow);
       if (!buy.success) {
         if (classifyStatus(buy.status) === 'missed') {
@@ -1010,6 +1166,20 @@
 
   // O Web App expõe objetos globais (services, UTSearchCriteriaDTO...). O bot
   // usa esses mesmos objetos, então as requisições saem idênticas às do app.
+  // Tipo do item que veio na busca: 'player', 'training' (consumível) ou outro.
+  // Sem confirmação, devolve null, e o bot não compra.
+  function itemKindOf(raw) {
+    if (!raw) return null;
+    const type = String(raw.type != null ? raw.type : (raw._type != null ? raw._type : '')).toLowerCase();
+    let isPlayer = null;
+    try { if (typeof raw.isPlayer === 'function') isPlayer = !!raw.isPlayer(); } catch (e) { isPlayer = null; }
+    if (isPlayer === true) return 'player';
+    if (type === 'player') return isPlayer === false ? null : 'player';
+    if (type === 'training') return 'training';
+    try { if (typeof raw.isTraining === 'function' && raw.isTraining()) return 'training'; } catch (e) { /* ignora */ }
+    return type || null;
+  }
+
   function createEaAdapter(win) {
     let internalCall = false;
     const G = (name) => lookupGlobal(win, name);
@@ -1047,16 +1217,29 @@
         name: itemName(raw),
         rating: raw.rating,
         definitionId: raw.definitionId,
+        kind: itemKindOf(raw),
         playStyle: field(raw, 'playStyle'),
         teamId: field(raw, 'teamId'),
         leagueId: field(raw, 'leagueId'),
         nationId: field(raw, 'nationId'),
+        position: any(raw, 'preferredPosition'),
+        positions: list(raw, 'possiblePositions'),
       };
     }
 
     function field(raw, name) {
       const v = raw[name] != null ? raw[name] : raw['_' + name];
       return typeof v === 'number' ? v : undefined;
+    }
+
+    function any(raw, name) {
+      const v = raw[name] != null ? raw[name] : raw['_' + name];
+      return typeof v === 'number' || typeof v === 'string' ? v : undefined;
+    }
+
+    function list(raw, name) {
+      const v = raw[name] != null ? raw[name] : raw['_' + name];
+      return Array.isArray(v) ? v : [];
     }
 
     function result(response) {
@@ -1164,7 +1347,16 @@
     futbinMargin: 15,
     showCardPrices: true,
     priceSource: 'ea',
+    dryRun: true,
   };
+
+  // Alvos criados antes da versão 0.6 não tinham tipo confirmado (foi assim que
+  // uma busca de consumível virou compra de jogador). Ficam desligados até o
+  // usuário revisar e salvar.
+  function migrateTarget(t) {
+    if (!t || t.kind) return t;
+    return Object.assign({}, t, { kind: kindFromCriteria(t.criteria), enabled: false, needsReview: true });
+  }
 
   function createStore(storage) {
     return {
@@ -1177,7 +1369,7 @@
         }
         return {
           settings: Object.assign({}, DEFAULT_SETTINGS, saved.settings),
-          targets: Array.isArray(saved.targets) ? saved.targets : [],
+          targets: (Array.isArray(saved.targets) ? saved.targets : []).map(migrateTarget),
           history: Array.isArray(saved.history) ? saved.history : [],
         };
       },
@@ -1229,6 +1421,14 @@
 #fcab-panel select{width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
 #fcab-panel .fb{margin-top:4px}
 #fcab-panel .fe{margin:6px 0}
+#fcab-panel .fe [hidden]{display:none}
+#fcab-panel .kind{font-weight:700;font-size:13px;margin:4px 0}
+#fcab-panel .kind-chemstyle{color:#b58cff}
+#fcab-panel .kind-player{color:#6fc3ff}
+#fcab-panel .kind-none{color:#ff6b6b}
+#fcab-panel .warnbox{background:#3a2a10;color:#ffd24d;border-radius:6px;padding:6px;font-size:12px;margin:4px 0}
+#fcab-panel .dry{margin:0 10px 8px;padding:8px;border-radius:8px;background:#3a3210;color:#ffe27a;font-size:12px;font-weight:600}
+#fcab-panel .dry[hidden]{display:none}
 #fcab-panel .fe-box{border-top:1px solid #2a2d33;margin-top:6px;padding-top:4px}
 #fcab-panel .fe-box[hidden]{display:none}
 #fcab-panel .tg small+button{padding:3px 8px;font-size:12px}
@@ -1288,6 +1488,7 @@
         <button data-act="close">✕</button>
       </div>
       <div class="stats" data-el="stats"></div>
+      <div class="dry" data-el="dry" hidden>🧪 MODO SIMULAÇÃO: o bot não compra nada, só mostra no Log o que compraria. Confira e desligue em Config.</div>
       <div class="fberr" data-el="fberr" hidden></div>
       <div class="tabs">
         <button data-tab="targets">Alvos</button>
@@ -1350,6 +1551,7 @@
 
     function renderStatus() {
       renderFutbinError();
+      el('dry').hidden = !app.state.settings.dryRun;
       const colors = { rodando: '#1db954', pausado: '#f5c542', parado: '#777' };
       panel.querySelector('.dot').style.background = colors[engine.status] || '#777';
       let text = engine.status.charAt(0).toUpperCase() + engine.status.slice(1);
@@ -1378,13 +1580,17 @@
       box.innerHTML = app.state.targets.map((t) => `
         <div class="tg" data-id="${escapeHtml(t.id)}">
           <div class="row">
-            <input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''}>
+            <input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''} ${t.needsReview || targetProblem(t) ? 'disabled' : ''}>
             <span class="name">${escapeHtml(t.name)}</span>
             <button data-f="remove">🗑</button>
           </div>
-          <small>${escapeHtml(describeTarget(t))}</small> <button data-f="editFilters">✎ Filtros</button>
+          <div class="kind kind-${escapeHtml(t.kind || 'none')}">${escapeHtml(describeTarget(t))}</div>
+          ${t.needsReview || targetProblem(t) ? '<div class="warnbox">⚠️ ' + escapeHtml(t.needsReview
+            ? 'Alvo criado numa versão antiga: confira o tipo e os filtros em ✎ Filtros e salve para poder ativar.'
+            : 'Não pode rodar: ' + targetProblem(t) + '.') + '</div>' : ''}
+          <button data-f="editFilters">✎ Filtros</button>
           <div class="fe-box" data-fe-for="${escapeHtml(t.id)}" hidden></div>
-          <div class="fb">${futbinLine(t)}</div>
+          ${t.kind === 'player' ? '<div class="fb">' + futbinLine(t) + '</div>' : ''}
           <div class="grid">
             <div><label>Compra até</label><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"></div>
             <div><label>Revende por</label><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"></div>
@@ -1392,30 +1598,42 @@
         </div>`).join('');
     }
 
-    // Editor de filtros (usado no "Novo alvo" e em cada alvo).
-    function filterEditorHtml(c, t) {
+    // Editor de filtros (usado no "Novo alvo" e em cada alvo). O tipo vem
+    // primeiro e decide quais campos aparecem: consumível só tem o estilo.
+    function filterEditorHtml(kind, c, t) {
       c = c || {};
       t = t || {};
       const opt = (value, label, current) =>
         '<option value="' + escapeHtml(value) + '"' + (String(current) === String(value) ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
-      const chem = Object.keys(chemStyles).map(Number).sort((a, b) => a - b)
-        .map((id) => opt(id, chemStyles[id], c.playStyle)).join('');
+      const styleOptions = (current) => Object.keys(chemStyles).map(Number).sort((a, b) => a - b)
+        .map((id) => opt(id, chemStyles[id], current)).join('');
       const num = (v) => (v > 0 ? v : '');
+      const hide = (k) => (kind === k ? '' : ' hidden');
       return '<div class="fe">' +
+        '<label>Tipo do alvo (obrigatório)</label><select data-fe="kind">' +
+        opt('', '— escolha —', kind || '') + KINDS.map((k) => opt(k[0], k[1], kind)).join('') + '</select>' +
+        '<div data-kind="chemstyle"' + hide('chemstyle') + '>' +
+        '<label>Qual estilo de química (a carta consumível)</label><select data-fe="consumableStyle">' +
+        opt('0', '— escolha —', c.playStyle || 0) + styleOptions(c.playStyle) + '</select>' +
+        '<p class="hint">Compra só a carta de consumível. Jogadores são sempre ignorados.</p></div>' +
+        '<div data-kind="player"' + hide('player') + '>' +
         '<div class="grid">' +
         '<div><label>Posição</label><select data-fe="position">' + opt('any', 'Qualquer', c.position || 'any') +
         POSITIONS.map((p) => opt(p, p, c.position)).join('') + '</select></div>' +
-        '<div><label>Estilo de química</label><select data-fe="playStyle">' + opt('0', 'Qualquer', c.playStyle || 0) + chem + '</select></div>' +
+        '<div><label>Química aplicada no jogador</label><select data-fe="playStyle">' + opt('0', 'Qualquer', c.playStyle || 0) +
+        styleOptions(c.playStyle) + '</select></div>' +
         '<div><label>Nível</label><select data-fe="level">' + opt('any', 'Qualquer', c.level || 'any') +
         LEVELS.map((l) => opt(l[0], l[1], c.level)).join('') + '</select></div>' +
-        '<div><label>Clube (ID)</label><input data-fe="club" inputmode="numeric" value="' + num(c.club) + '"></div>' +
+        '<div><label>Clube / time (ID)</label><input data-fe="club" inputmode="numeric" value="' + num(c.club) + '"></div>' +
         '<div><label>Liga (ID)</label><input data-fe="league" inputmode="numeric" value="' + num(c.league) + '"></div>' +
         '<div><label>País (ID)</label><input data-fe="nation" inputmode="numeric" value="' + num(c.nation) + '"></div>' +
         '<div><label>Nota mínima</label><input data-fe="minRating" inputmode="numeric" value="' + num(t.minRating) + '"></div>' +
         '<div><label>Nota máxima</label><input data-fe="maxRating" inputmode="numeric" value="' + num(t.maxRating) + '"></div>' +
         '</div>' +
-        '<p class="hint">Clube, liga e país: escolha pelo nome na busca do Web App que o ID é preenchido sozinho. ' +
-        'A nota é conferida antes de comprar. Estilos de química: ' + chemStylesSource + '.</p></div>';
+        '<p class="hint">Compra só jogadores. Time, liga e país: escolha pelo nome na busca do Web App (Transferências → ' +
+        'Pesquisar → Jogadores) que o ID vem preenchido. Antes de comprar, o bot confere posição, química, time, liga, ' +
+        'país e nota; se não conseguir confirmar algum, não compra.</p></div>' +
+        '<p class="hint">Estilos de química: ' + chemStylesSource + '.</p></div>';
     }
 
     function readFilterEditor(box) {
@@ -1427,8 +1645,22 @@
       return values;
     }
 
+    // Monta tipo + critérios a partir do editor. base = busca capturada ou alvo atual.
+    function targetFromEditor(box, base) {
+      const values = readFilterEditor(box);
+      const kind = values.kind || null;
+      const forKind = kind === 'chemstyle' ? Object.assign({}, values, { playStyle: values.consumableStyle }) : values;
+      const player = kind === 'player';
+      return {
+        kind,
+        criteria: kind ? criteriaForKind(kind, base, forKind) : Object.assign({}, base),
+        minRating: player ? values.minRating || 0 : 0,
+        maxRating: player ? values.maxRating || 0 : 0,
+      };
+    }
+
     function renderNewFilters() {
-      el('newFilters').innerHTML = filterEditorHtml(app.captured, null);
+      el('newFilters').innerHTML = filterEditorHtml(kindFromCriteria(app.captured), app.captured, null);
     }
 
     function futbinLine(t) {
@@ -1467,6 +1699,8 @@
       el('settings').innerHTML = '<label>Plataforma (preço do FUTBIN)</label><select data-setting="platform">' +
         '<option value="ps"' + (platform !== 'pc' ? ' selected' : '') + '>PlayStation / Xbox</option>' +
         '<option value="pc"' + (platform === 'pc' ? ' selected' : '') + '>PC</option></select>' +
+        '<label style="color:#ffd24d"><input type="checkbox" data-setting="dryRun"' + (app.state.settings.dryRun ? ' checked' : '') +
+        '> Modo simulação: procura mas NÃO compra (use para testar alvos novos)</label>' +
         '<label><input type="checkbox" data-setting="showCardPrices"' + (app.state.settings.showCardPrices ? ' checked' : '') +
         '> Mostrar preço em cada carta</label>' +
         '<label>Preço mostrado nas cartas</label><select data-setting="priceSource">' +
@@ -1492,14 +1726,20 @@
     }
 
     function onCaptured(criteria, card) {
+      const kind = kindFromCriteria(criteria);
+      if (kind !== 'player') card = null;
       app.captured = criteria;
       app.capturedCard = card || null;
       if (!card) renderNewFilters();
-      const label = card ? card.name + ' ' + (card.rating || '') + ' · ' + describeCriteria(criteria) : describeCriteria(criteria);
-      el('captured').innerHTML = 'Busca capturada: <b>' + escapeHtml(label) + '</b>';
+      const kindText = kind ? kindLabel(kind).toUpperCase() : 'TIPO NÃO RECONHECIDO (escolha abaixo)';
+      const label = (card ? card.name + ' ' + (card.rating || '') + ' · ' : '') + describeCriteria(criteria);
+      el('captured').innerHTML = 'Busca capturada: <b>' + escapeHtml(kindText) + '</b> · ' + escapeHtml(label);
       el('capturedPrice').textContent = card ? 'FUTBIN: buscando preço...' : '';
       if (!card) {
-        if (!el('newName').value) el('newName').value = describeCriteria(criteria);
+        if (!el('newName').value) {
+          el('newName').value = kind === 'chemstyle' && criteria.playStyle > 0
+            ? 'Consumível ' + chemStyleName(criteria.playStyle) : describeCriteria(criteria);
+        }
         return;
       }
       el('newName').value = card.name + ' ' + (card.rating || '');
@@ -1519,26 +1759,27 @@
 
     function addTarget() {
       const id = parseCoins(el('newId').value);
-      const base = id ? { type: 'player', maskedDefId: id } : (app.captured || { type: 'player' });
-      const values = readFilterEditor(el('newFilters'));
-      const criteria = applyFilterValues(base, values);
-      const ratings = { minRating: values.minRating || 0, maxRating: values.maxRating || 0 };
-      if (!hasAnyFilter(criteria, ratings)) {
-        return win.alert('Escolha um jogador (busca no mercado ou ID) ou pelo menos um filtro: posição, química, clube, liga, país, nível ou nota.');
-      }
+      const edited = targetFromEditor(el('newFilters'), id ? { type: 'player', maskedDefId: id } : (app.captured || {}));
+      if (id && edited.kind !== 'player') return win.alert('O ID de jogador só vale para o tipo "Jogador".');
       const maxBuy = parseCoins(el('newMax').value);
-      if (maxBuy < 200) return win.alert('Informe um preço máximo de compra (mínimo 200).');
+      const draft = Object.assign({}, edited, { maxBuy });
+      const problem = targetProblem(draft);
+      if (problem) return win.alert('Não dá para adicionar: ' + problem + '.');
       const sellPrice = parseCoins(el('newSell').value);
       if (sellPrice && sellPrice <= maxBuy) {
         if (!win.confirm('O preço de revenda é menor ou igual ao de compra. Adicionar mesmo assim?')) return;
       }
-      const card = id ? null : app.capturedCard;
+      const card = id || edited.kind !== 'player' ? null : app.capturedCard;
+      const summary = describeTarget(draft);
+      if (!win.confirm('Confirme o alvo:\n\n' + summary + '\nCompra até ' + fmt(maxBuy) +
+        (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       app.state.targets.push({
         id: Date.now().toString(36),
-        name: el('newName').value.trim() || describeCriteria(criteria),
-        criteria,
-        minRating: ratings.minRating,
-        maxRating: ratings.maxRating,
+        name: el('newName').value.trim() || summary,
+        kind: edited.kind,
+        criteria: edited.criteria,
+        minRating: edited.minRating,
+        maxRating: edited.maxRating,
         maxBuy,
         sellPrice,
         enabled: true,
@@ -1627,28 +1868,30 @@
         const box = tg.querySelector('.fe-box');
         box.hidden = !box.hidden;
         if (!box.hidden) {
-          box.innerHTML = filterEditorHtml(tgt.criteria, tgt) +
+          box.innerHTML = filterEditorHtml(tgt.kind, tgt.criteria, tgt) +
             '<button data-f="saveFilters">Salvar filtros</button> ' +
             (app.captured ? '<button data-f="useCaptured">Usar a última busca do mercado</button>' : '');
         }
         return;
       }
       if (tgt && e.target.dataset.f === 'useCaptured' && app.captured) {
-        tgt.criteria = Object.assign({}, app.captured);
-        if (app.capturedCard) tgt.card = app.capturedCard;
-        save();
-        renderTargets();
-        log('Filtros de ' + tgt.name + ' trocados pela última busca.', 'success');
+        // Só preenche o editor; nada muda até o usuário conferir e salvar.
+        const box = tg.querySelector('.fe-box');
+        box.dataset.base = JSON.stringify(app.captured);
+        box.querySelector('.fe').outerHTML = filterEditorHtml(kindFromCriteria(app.captured), app.captured, tgt);
+        log('Editor preenchido com a última busca. Confira o tipo e toque em Salvar filtros.', 'warn');
         return;
       }
       if (tgt && e.target.dataset.f === 'saveFilters') {
-        const values = readFilterEditor(tg.querySelector('.fe-box'));
-        const criteria = applyFilterValues(tgt.criteria, values);
-        const ratings = { minRating: values.minRating || 0, maxRating: values.maxRating || 0 };
-        if (!hasAnyFilter(criteria, ratings)) return win.alert('Deixe pelo menos um filtro.');
-        tgt.criteria = criteria;
-        tgt.minRating = ratings.minRating;
-        tgt.maxRating = ratings.maxRating;
+        const box = tg.querySelector('.fe-box');
+        const base = box.dataset.base ? JSON.parse(box.dataset.base) : tgt.criteria;
+        const edited = targetFromEditor(box, base);
+        const draft = Object.assign({}, tgt, edited);
+        const problem = targetProblem(draft);
+        if (problem) return win.alert('Não dá para salvar: ' + problem + '.');
+        if (!win.confirm('Confirme o alvo:\n\n' + describeTarget(draft) + '\nCompra até ' + fmt(tgt.maxBuy))) return;
+        Object.assign(tgt, edited, { needsReview: false });
+        if (tgt.kind !== 'player') { tgt.card = null; tgt.futbin = null; }
         save();
         renderTargets();
         log('Filtros de ' + tgt.name + ' salvos: ' + describeTarget(tgt) + '.', 'success');
@@ -1684,6 +1927,17 @@
         log('Preço nas cartas: ' + (app.state.settings.priceSource === 'ea' ? 'média da EA' : 'FUTBIN') + '. Troque de tela para atualizar.', 'success');
         return;
       }
+      if (key === 'dryRun') {
+        if (!e.target.checked && !win.confirm('Desligar a simulação? A partir daí o bot COMPRA de verdade.')) {
+          e.target.checked = true;
+          return;
+        }
+        app.state.settings.dryRun = e.target.checked;
+        save();
+        renderStatus();
+        log(app.state.settings.dryRun ? 'Modo simulação ligado.' : 'Modo simulação desligado: compras de verdade.', 'warn');
+        return;
+      }
       if (key === 'showCardPrices') {
         app.state.settings.showCardPrices = e.target.checked;
         save();
@@ -1704,13 +1958,25 @@
         if (key === 'futbinMargin') renderTargets();
         return;
       }
+      if (e.target.dataset.fe === 'kind') {
+        const fe = e.target.closest('.fe');
+        fe.querySelectorAll('[data-kind]').forEach((sec) => { sec.hidden = sec.dataset.kind !== e.target.value; });
+        return;
+      }
       if (e.target.dataset.fe) return;
       const tg = e.target.closest('.tg');
       const f = e.target.dataset.f;
       if (!tg || !f) return;
       const target = app.state.targets.find((t) => t.id === tg.dataset.id);
       if (!target) return;
-      if (f === 'enabled') target.enabled = e.target.checked;
+      if (f === 'enabled') {
+        const problem = target.needsReview ? 'revise o alvo em ✎ Filtros e salve' : targetProblem(target);
+        if (e.target.checked && problem) {
+          e.target.checked = false;
+          return win.alert('Não dá para ativar: ' + problem + '.');
+        }
+        target.enabled = e.target.checked;
+      }
       if (f === 'maxBuy') target.maxBuy = parseCoins(e.target.value) || target.maxBuy;
       if (f === 'sellPrice') target.sellPrice = parseCoins(e.target.value);
       save();
@@ -1781,7 +2047,7 @@
       // do bot traz o nome, e aí dá para consultar o FUTBIN.
       onSearchResults: (target, items) => {
         const c = target.criteria || {};
-        if (target.card || !(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length))) return;
+        if (target.kind !== 'player' || target.card || !(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length))) return;
         const card = cardFromItems(items);
         if (!card) return;
         target.card = card;
@@ -1812,7 +2078,8 @@
     createFutbin, createBridgeRequest, cardFromItems,
     formatShort, createPriceService, createPriceOverlay, lookupGlobal, errorCode,
     eaMarketAverage, priceFieldsOf, withCircuitBreaker,
-    applyFilterValues, hasAnyFilter, matchesFilters, describeTarget, loadChemStyles, chemStyleName,
+    kindFromCriteria, criteriaForKind, hasPlayerFilter, targetProblem, mismatchReason, describeTarget,
+    describeItem, itemKindOf, migrateTarget, loadChemStyles, chemStyleName,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

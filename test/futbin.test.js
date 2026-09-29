@@ -125,11 +125,11 @@ test('ponte responde ao ping quando já está instalada', () => {
 
 test('bot identifica a carta e mostra o FUTBIN no log', async () => {
   const seen = [];
-  const target = { id: 't', name: 'Alvo', criteria: { maskedDefId: 5 }, maxBuy: 10000, enabled: true, futbin: { price: 12000 } };
+  const target = { id: 't', name: 'Alvo', kind: 'player', criteria: { type: 'player', maskedDefId: 5 }, maxBuy: 10000, enabled: true, futbin: { price: 12000 } };
   const adapter = {
     getCoins: () => 1e6,
     async search() {
-      return { success: true, status: 200, items: [{ tradeId: 1, buyNow: 9000, name: 'Fulano', definitionId: 5, rating: 80, raw: {} }] };
+      return { success: true, status: 200, items: [{ tradeId: 1, buyNow: 9000, name: 'Fulano', kind: 'player', definitionId: 5, rating: 80, raw: {} }] };
     },
     async buy() { return { success: true, status: 200 }; },
     async list() { return { success: true, status: 200 }; },

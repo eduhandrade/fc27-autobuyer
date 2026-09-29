@@ -29,6 +29,7 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
    - **Preço máximo de compra**: o bot só compra por esse valor ou menos.
    - **Preço de revenda** (opcional): se preenchido, a carta é listada automaticamente por esse preço (duração de 1h).
    - Com a ponte instalada, o painel mostra o **preço do FUTBIN** da carta e já preenche uma sugestão: compra até o FUTBIN menos a margem (padrão 15%) e revenda pelo preço do FUTBIN.
+   - **Filtros:** no "Novo alvo" e no botão **✎ Filtros** de cada alvo dá para escolher posição, **estilo de química** (nomes do jogo), nível, clube, liga, país e nota mínima/máxima. Não precisa escolher jogador: "qualquer CB Shadow do clube X até 5.000" funciona. Clube, liga e país usam o ID da EA; escolhendo pelo nome na busca do Web App, o ID é preenchido sozinho. Antes de comprar, o bot confere química, clube, liga, país e nota da carta.
 2. Revise a aba **Config**: plataforma (PlayStation/Xbox ou PC), margem do FUTBIN: esperas, pausas e limites.
 3. Toque em **Iniciar**. Acompanhe pelas abas **Log** e **Compras**.
 

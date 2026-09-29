@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.4.0
+// @version      0.5.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.4.0';
+  const SCRIPT_VERSION = '0.5.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -106,12 +106,90 @@
     });
   }
 
+  // Filtros extras. Posição, nível e estilo de química têm nomes conhecidos;
+  // clube, liga e país usam o ID da EA (a busca do Web App preenche sozinha).
+  const POSITIONS = ['GK', 'RB', 'LB', 'CB', 'CDM', 'CM', 'CAM', 'RM', 'LM', 'RW', 'LW', 'ST'];
+  const LEVELS = [['bronze', 'Bronze'], ['silver', 'Prata'], ['gold', 'Ouro'], ['SP', 'Especial']];
+  const DEFAULT_CHEM_STYLES = {
+    250: 'Basic', 251: 'Sniper', 252: 'Finisher', 253: 'Deadeye', 254: 'Marksman', 255: 'Hawk',
+    256: 'Artist', 257: 'Architect', 258: 'Powerhouse', 259: 'Maestro', 260: 'Engine', 261: 'Sentinel',
+    262: 'Guardian', 263: 'Gladiator', 264: 'Backbone', 265: 'Anchor', 266: 'Hunter', 267: 'Catalyst',
+    268: 'Shadow', 269: 'Wall', 270: 'Shield', 271: 'Cat', 272: 'Glove', 273: 'GK Basic',
+  };
+  let chemStyles = Object.assign({}, DEFAULT_CHEM_STYLES);
+  let chemStylesSource = 'lista padrão';
+
+  // Usa os nomes (e IDs) de estilos de química do próprio jogo quando o Web App
+  // oferece a tradução; assim a lista acompanha o FC 27 mesmo se a EA mudar algo.
+  function loadChemStyles(localize) {
+    if (typeof localize !== 'function') return false;
+    const found = {};
+    for (let id = 240; id <= 320; id++) {
+      let name;
+      try { name = localize('playstyles.playstyle' + id); } catch (e) { name = null; }
+      if (typeof name === 'string' && name && !/playstyle/i.test(name)) found[id] = name;
+    }
+    if (Object.keys(found).length < 5) return false;
+    chemStyles = found;
+    chemStylesSource = 'nomes do jogo';
+    return true;
+  }
+
+  function chemStyleName(id) {
+    return chemStyles[id] || ('estilo #' + id);
+  }
+
+  const FILTER_KEYS = ['position', 'playStyle', 'level', 'club', 'league', 'nation'];
+
+  // Aplica os valores do editor sobre os critérios: vazio/"qualquer" remove o filtro.
+  function applyFilterValues(criteria, values) {
+    const out = Object.assign({}, criteria);
+    for (const key of FILTER_KEYS) {
+      const v = values[key];
+      const empty = v == null || v === '' || v === 'any' || v === 0 || v === '0';
+      if (empty) delete out[key];
+      else out[key] = ['playStyle', 'club', 'league', 'nation'].includes(key) ? parseInt(v, 10) : v;
+    }
+    if (!out.type) out.type = 'player';
+    return out;
+  }
+
+  function hasAnyFilter(criteria, target) {
+    const c = criteria || {};
+    return !!(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length) ||
+      FILTER_KEYS.some((k) => c[k] != null && c[k] !== 'any' && c[k] !== -1) ||
+      (Array.isArray(c.rarities) && c.rarities.length) ||
+      (target && (target.minRating > 0 || target.maxRating > 0)));
+  }
+
+  // Confere a carta antes de comprar, caso a busca da EA traga algo fora do filtro.
+  function matchesFilters(it, target) {
+    const c = target.criteria || {};
+    const differs = (want, got) => want > 0 && got != null && got !== want;
+    if (differs(c.playStyle, it.playStyle)) return false;
+    if (differs(c.club, it.teamId)) return false;
+    if (differs(c.league, it.leagueId)) return false;
+    if (differs(c.nation, it.nationId)) return false;
+    if (target.minRating > 0 && it.rating != null && it.rating < target.minRating) return false;
+    if (target.maxRating > 0 && it.rating != null && it.rating > target.maxRating) return false;
+    return true;
+  }
+
+  function describeTarget(t) {
+    let text = describeCriteria(t.criteria);
+    if (t.minRating > 0 || t.maxRating > 0) {
+      text += ' · nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?');
+    }
+    return text;
+  }
+
   function describeCriteria(c) {
     if (!c) return '';
     const parts = [];
     if (c.maskedDefId) parts.push('jogador ' + c.maskedDefId);
     if (Array.isArray(c.defId) && c.defId.length) parts.push('carta ' + c.defId.join(','));
-    if (c.level && c.level !== 'any') parts.push('nível ' + c.level);
+    if (c.playStyle > 0) parts.push('química ' + chemStyleName(c.playStyle));
+    if (c.level && c.level !== 'any') parts.push('nível ' + ((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level));
     if (Array.isArray(c.rarities) && c.rarities.length) parts.push('raridade ' + c.rarities.join(','));
     if (c.position && c.position !== 'any') parts.push('posição ' + c.position);
     if (c.league > 0) parts.push('liga ' + c.league);
@@ -133,6 +211,7 @@
       it.buyNow <= target.maxBuy &&
       it.buyNow <= coins &&
       it.buyNow <= budgetLeft &&
+      matchesFilters(it, target) &&
       !(ctx.seen && ctx.seen.has(it.tradeId))
     );
     eligible.sort((a, b) => a.buyNow - b.buyNow);
@@ -968,7 +1047,16 @@
         name: itemName(raw),
         rating: raw.rating,
         definitionId: raw.definitionId,
+        playStyle: field(raw, 'playStyle'),
+        teamId: field(raw, 'teamId'),
+        leagueId: field(raw, 'leagueId'),
+        nationId: field(raw, 'nationId'),
       };
+    }
+
+    function field(raw, name) {
+      const v = raw[name] != null ? raw[name] : raw['_' + name];
+      return typeof v === 'number' ? v : undefined;
     }
 
     function result(response) {
@@ -991,6 +1079,12 @@
           ['UTSearchCriteriaDTO', typeof G('UTSearchCriteriaDTO') === 'function'],
           ['saldo de moedas', this.getCoins() != null],
         ];
+      },
+
+      localize() {
+        const svc = G('services');
+        const loc = svc && svc.Localization;
+        return loc && typeof loc.localize === 'function' ? loc.localize.bind(loc) : null;
       },
 
       getCoins() {
@@ -1134,6 +1228,10 @@
 #fcab-panel input[type=text],#fcab-panel input:not([type]){width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
 #fcab-panel select{width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
 #fcab-panel .fb{margin-top:4px}
+#fcab-panel .fe{margin:6px 0}
+#fcab-panel .fe-box{border-top:1px solid #2a2d33;margin-top:6px;padding-top:4px}
+#fcab-panel .fe-box[hidden]{display:none}
+#fcab-panel .tg small+button{padding:3px 8px;font-size:12px}
 #fcab-panel .fb button{padding:4px 8px;font-size:12px;margin-top:4px}
 #fcab-panel .hint{font-size:12px;color:#999;margin:6px 0}
 #fcab-panel .tg{border:1px solid #2a2d33;border-radius:8px;padding:8px;margin:6px 0}
@@ -1203,6 +1301,7 @@
         <p class="hint">Jeito fácil: feche este painel, vá em <b>Transferências → Pesquisar no mercado</b>, escolha o jogador e os filtros e toque em Pesquisar. A busca aparece aqui embaixo automaticamente.</p>
         <p class="hint" data-el="captured">Nenhuma busca capturada ainda.</p>
         <p class="hint" data-el="capturedPrice"></p>
+        <div data-el="newFilters"></div>
         <label>Ou ID do jogador na EA (deixe vazio para usar a busca capturada)</label>
         <input data-el="newId" inputmode="numeric">
         <label>Nome (só pra você identificar)</label>
@@ -1283,13 +1382,53 @@
             <span class="name">${escapeHtml(t.name)}</span>
             <button data-f="remove">🗑</button>
           </div>
-          <small>${escapeHtml(describeCriteria(t.criteria))}</small>
+          <small>${escapeHtml(describeTarget(t))}</small> <button data-f="editFilters">✎ Filtros</button>
+          <div class="fe-box" data-fe-for="${escapeHtml(t.id)}" hidden></div>
           <div class="fb">${futbinLine(t)}</div>
           <div class="grid">
             <div><label>Compra até</label><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"></div>
             <div><label>Revende por</label><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"></div>
           </div>
         </div>`).join('');
+    }
+
+    // Editor de filtros (usado no "Novo alvo" e em cada alvo).
+    function filterEditorHtml(c, t) {
+      c = c || {};
+      t = t || {};
+      const opt = (value, label, current) =>
+        '<option value="' + escapeHtml(value) + '"' + (String(current) === String(value) ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+      const chem = Object.keys(chemStyles).map(Number).sort((a, b) => a - b)
+        .map((id) => opt(id, chemStyles[id], c.playStyle)).join('');
+      const num = (v) => (v > 0 ? v : '');
+      return '<div class="fe">' +
+        '<div class="grid">' +
+        '<div><label>Posição</label><select data-fe="position">' + opt('any', 'Qualquer', c.position || 'any') +
+        POSITIONS.map((p) => opt(p, p, c.position)).join('') + '</select></div>' +
+        '<div><label>Estilo de química</label><select data-fe="playStyle">' + opt('0', 'Qualquer', c.playStyle || 0) + chem + '</select></div>' +
+        '<div><label>Nível</label><select data-fe="level">' + opt('any', 'Qualquer', c.level || 'any') +
+        LEVELS.map((l) => opt(l[0], l[1], c.level)).join('') + '</select></div>' +
+        '<div><label>Clube (ID)</label><input data-fe="club" inputmode="numeric" value="' + num(c.club) + '"></div>' +
+        '<div><label>Liga (ID)</label><input data-fe="league" inputmode="numeric" value="' + num(c.league) + '"></div>' +
+        '<div><label>País (ID)</label><input data-fe="nation" inputmode="numeric" value="' + num(c.nation) + '"></div>' +
+        '<div><label>Nota mínima</label><input data-fe="minRating" inputmode="numeric" value="' + num(t.minRating) + '"></div>' +
+        '<div><label>Nota máxima</label><input data-fe="maxRating" inputmode="numeric" value="' + num(t.maxRating) + '"></div>' +
+        '</div>' +
+        '<p class="hint">Clube, liga e país: escolha pelo nome na busca do Web App que o ID é preenchido sozinho. ' +
+        'A nota é conferida antes de comprar. Estilos de química: ' + chemStylesSource + '.</p></div>';
+    }
+
+    function readFilterEditor(box) {
+      const values = {};
+      box.querySelectorAll('[data-fe]').forEach((input) => {
+        const key = input.dataset.fe;
+        values[key] = input.tagName === 'SELECT' ? input.value : parseCoins(input.value);
+      });
+      return values;
+    }
+
+    function renderNewFilters() {
+      el('newFilters').innerHTML = filterEditorHtml(app.captured, null);
     }
 
     function futbinLine(t) {
@@ -1355,6 +1494,7 @@
     function onCaptured(criteria, card) {
       app.captured = criteria;
       app.capturedCard = card || null;
+      if (!card) renderNewFilters();
       const label = card ? card.name + ' ' + (card.rating || '') + ' · ' + describeCriteria(criteria) : describeCriteria(criteria);
       el('captured').innerHTML = 'Busca capturada: <b>' + escapeHtml(label) + '</b>';
       el('capturedPrice').textContent = card ? 'FUTBIN: buscando preço...' : '';
@@ -1379,8 +1519,13 @@
 
     function addTarget() {
       const id = parseCoins(el('newId').value);
-      const criteria = id ? { type: 'player', maskedDefId: id } : app.captured;
-      if (!criteria) return win.alert('Faça uma busca no mercado ou informe o ID do jogador.');
+      const base = id ? { type: 'player', maskedDefId: id } : (app.captured || { type: 'player' });
+      const values = readFilterEditor(el('newFilters'));
+      const criteria = applyFilterValues(base, values);
+      const ratings = { minRating: values.minRating || 0, maxRating: values.maxRating || 0 };
+      if (!hasAnyFilter(criteria, ratings)) {
+        return win.alert('Escolha um jogador (busca no mercado ou ID) ou pelo menos um filtro: posição, química, clube, liga, país, nível ou nota.');
+      }
       const maxBuy = parseCoins(el('newMax').value);
       if (maxBuy < 200) return win.alert('Informe um preço máximo de compra (mínimo 200).');
       const sellPrice = parseCoins(el('newSell').value);
@@ -1392,6 +1537,8 @@
         id: Date.now().toString(36),
         name: el('newName').value.trim() || describeCriteria(criteria),
         criteria,
+        minRating: ratings.minRating,
+        maxRating: ratings.maxRating,
         maxBuy,
         sellPrice,
         enabled: true,
@@ -1400,6 +1547,11 @@
       });
       save();
       ['newId', 'newName', 'newMax', 'newSell'].forEach((k) => { el(k).value = ''; });
+      app.captured = null;
+      app.capturedCard = null;
+      el('captured').textContent = 'Nenhuma busca capturada ainda.';
+      el('capturedPrice').textContent = '';
+      renderNewFilters();
       renderTargets();
       log('Alvo adicionado.', 'success');
     }
@@ -1471,6 +1623,37 @@
       }
       const tg = e.target.closest('.tg');
       const tgt = tg && app.state.targets.find((t) => t.id === tg.dataset.id);
+      if (tgt && e.target.dataset.f === 'editFilters') {
+        const box = tg.querySelector('.fe-box');
+        box.hidden = !box.hidden;
+        if (!box.hidden) {
+          box.innerHTML = filterEditorHtml(tgt.criteria, tgt) +
+            '<button data-f="saveFilters">Salvar filtros</button> ' +
+            (app.captured ? '<button data-f="useCaptured">Usar a última busca do mercado</button>' : '');
+        }
+        return;
+      }
+      if (tgt && e.target.dataset.f === 'useCaptured' && app.captured) {
+        tgt.criteria = Object.assign({}, app.captured);
+        if (app.capturedCard) tgt.card = app.capturedCard;
+        save();
+        renderTargets();
+        log('Filtros de ' + tgt.name + ' trocados pela última busca.', 'success');
+        return;
+      }
+      if (tgt && e.target.dataset.f === 'saveFilters') {
+        const values = readFilterEditor(tg.querySelector('.fe-box'));
+        const criteria = applyFilterValues(tgt.criteria, values);
+        const ratings = { minRating: values.minRating || 0, maxRating: values.maxRating || 0 };
+        if (!hasAnyFilter(criteria, ratings)) return win.alert('Deixe pelo menos um filtro.');
+        tgt.criteria = criteria;
+        tgt.minRating = ratings.minRating;
+        tgt.maxRating = ratings.maxRating;
+        save();
+        renderTargets();
+        log('Filtros de ' + tgt.name + ' salvos: ' + describeTarget(tgt) + '.', 'success');
+        return;
+      }
       if (tgt && e.target.dataset.f === 'futbin') {
         e.target.disabled = true;
         refreshTargetPrice(tgt, false);
@@ -1521,6 +1704,7 @@
         if (key === 'futbinMargin') renderTargets();
         return;
       }
+      if (e.target.dataset.fe) return;
       const tg = e.target.closest('.tg');
       const f = e.target.dataset.f;
       if (!tg || !f) return;
@@ -1533,6 +1717,7 @@
     });
 
     renderTargets();
+    renderNewFilters();
     renderSettings();
     renderStatus();
     renderTabs();
@@ -1540,6 +1725,10 @@
     return {
       log,
       onCaptured,
+      refreshFilters() {
+        renderNewFilters();
+        renderTargets();
+      },
       onTargetCard(t) {
         refreshTargetPrice(t, true);
       },
@@ -1607,6 +1796,7 @@
       if (!adapter.ready()) return;
       clearInterval(timer);
       adapter.hookManualSearch((criteria, card) => ui.onCaptured(criteria, card));
+      if (loadChemStyles(adapter.localize())) ui.refreshFilters();
       const hooks = overlay.install();
       ui.log('Web App detectado. Pronto para usar.', 'success');
       if (!hooks.length) ui.log('Não achei as funções que desenham as cartas; o preço do FUTBIN não vai aparecer nelas. Veja o Diagnóstico.', 'warn');
@@ -1622,6 +1812,7 @@
     createFutbin, createBridgeRequest, cardFromItems,
     formatShort, createPriceService, createPriceOverlay, lookupGlobal, errorCode,
     eaMarketAverage, priceFieldsOf, withCircuitBreaker,
+    applyFilterValues, hasAnyFilter, matchesFilters, describeTarget, loadChemStyles, chemStyleName,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

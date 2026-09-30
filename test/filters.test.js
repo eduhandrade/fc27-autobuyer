@@ -90,10 +90,10 @@ test('zagueiro com Shadow: confere tipo, posição, química, time e nota', () =
   assert.equal(ab.mismatchReason(Object.assign({}, ok, { kind: 'training' }), t), 'não é jogador');
   assert.equal(ab.mismatchReason(Object.assign({}, ok, { position: 'ST', positions: ['ST'] }), t), 'posição diferente');
   assert.equal(ab.mismatchReason(Object.assign({}, ok, { position: undefined, positions: [] }), t), 'não deu para confirmar a posição');
-  assert.equal(ab.mismatchReason(Object.assign({}, ok, { playStyle: 250 }), t), 'a química diferente');
+  assert.equal(ab.mismatchReason(Object.assign({}, ok, { playStyle: 250 }), t), 'química diferente');
   assert.equal(ab.mismatchReason(Object.assign({}, ok, { playStyle: undefined }), t), 'não deu para confirmar a química');
-  assert.equal(ab.mismatchReason(Object.assign({}, ok, { teamId: 1 }), t), 'o clube diferente');
-  assert.equal(ab.mismatchReason(Object.assign({}, ok, { teamId: undefined }), t), 'não deu para confirmar o clube');
+  assert.equal(ab.mismatchReason(Object.assign({}, ok, { teamId: 1 }), t), 'time diferente');
+  assert.equal(ab.mismatchReason(Object.assign({}, ok, { teamId: undefined }), t), 'não deu para confirmar o time');
   assert.equal(ab.mismatchReason(Object.assign({}, ok, { rating: 83 }), t), 'nota abaixo do mínimo');
   assert.equal(ab.mismatchReason(Object.assign({}, ok, { rating: 87 }), t), 'nota acima do máximo');
   // Posição alternativa também vale.
@@ -121,9 +121,14 @@ test('alvos de versões antigas ficam desligados até revisar', () => {
 });
 
 test('descreve alvos deixando claro o tipo', () => {
-  assert.equal(ab.describeTarget(shadowConsumable), 'CONSUMÍVEL · estilo Shadow');
+  assert.equal(ab.describeTarget(shadowConsumable), 'CONSUMÍVEL · Estilo Shadow');
   const t = { kind: 'player', criteria: { type: 'player', playStyle: 268, position: 'CB', level: 'gold', club: 243 }, minRating: 84, maxRating: 0 };
-  assert.equal(ab.describeTarget(t), 'JOGADOR · com química Shadow · nível Ouro · posição CB · clube 243 · nota 84–?');
+  assert.equal(ab.describeTarget(t), 'JOGADOR · CB · Química Shadow · time #243 · Ouro · Nota 84–?');
+  // Com nomes: do alvo ou do serviço de nomes, nunca o número.
+  assert.equal(ab.describeTarget(Object.assign({}, t, { labels: { club: 'Real Madrid' } })),
+    'JOGADOR · CB · Química Shadow · Real Madrid · Ouro · Nota 84–?');
+  assert.equal(ab.describeTarget(t, { club: (id) => (id === 243 ? 'Real Madrid' : null) }),
+    'JOGADOR · CB · Química Shadow · Real Madrid · Ouro · Nota 84–?');
   assert.match(ab.describeTarget({ criteria: {} }), /^TIPO NÃO DEFINIDO/);
 });
 

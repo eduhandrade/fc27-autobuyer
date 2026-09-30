@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.6.0
+// @version      0.7.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.6.0';
+  const SCRIPT_VERSION = '0.7.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -169,6 +169,59 @@
     return !!n && [chemStyles[id], DEFAULT_CHEM_STYLES[id]].some((x) => x && normalizeName(x) === n);
   }
 
+  // PlayStyles (traitId -> nome), na ordem das categorias do jogo. A carta
+  // informa os seus via getPlayStyles(): [{ traitId, isIcon }], isIcon = "+".
+  const PLAYSTYLES = {
+    0: 'Finesse Shot', 1: 'Chip Shot', 2: 'Power Shot', 3: 'Dead Ball', 4: 'Precision Header', 5: 'Acrobatic',
+    6: 'Low Driven Shot', 7: 'Gamechanger', 8: 'Incisive Pass', 9: 'Pinged Pass', 10: 'Long Ball Pass',
+    11: 'Tiki Taka', 12: 'Whipped Pass', 13: 'Inventive', 14: 'Jockey', 15: 'Block', 16: 'Intercept',
+    17: 'Anticipate', 18: 'Slide Tackle', 19: 'Aerial Fortress', 20: 'Technical', 21: 'Rapid', 22: 'First Touch',
+    23: 'Trickster', 24: 'Press Proven', 25: 'Quick Step', 26: 'Relentless', 27: 'Long Throw', 28: 'Bruiser',
+    29: 'Enforcer', 30: 'Far Throw', 31: 'Footwork', 32: 'Cross Claimer', 33: '1v1 Close Down', 34: 'Far Reach',
+    35: 'Deflector',
+  };
+  const PLAYSTYLE_GROUPS = [
+    ['Finalização', [0, 1, 2, 3, 4, 5, 6, 7]],
+    ['Passe', [8, 9, 10, 11, 12, 13]],
+    ['Defesa', [14, 15, 16, 17, 18, 19]],
+    ['Controle de bola', [20, 21, 22, 23, 24]],
+    ['Físico', [25, 26, 27, 28, 29]],
+    ['Goleiro', [30, 31, 32, 33, 34, 35]],
+  ];
+
+  function playStyleName(id, plus) {
+    return (PLAYSTYLES[id] || 'PlayStyle #' + id) + (plus ? '+' : '');
+  }
+
+  // Normaliza o que a EA devolve em getPlayStyles() para [{ id, plus }].
+  function readPlayStyles(raw) {
+    let list;
+    try {
+      list = typeof raw.getPlayStyles === 'function' ? raw.getPlayStyles() : undefined;
+    } catch (e) {
+      list = undefined;
+    }
+    if (!Array.isArray(list)) return undefined;
+    return list
+      .map((p) => ({
+        id: typeof p === 'number' ? p : (p && (p.traitId != null ? p.traitId : p.id)),
+        plus: !!(p && typeof p === 'object' && (p.isIcon || p.plus || p.isPlus)),
+      }))
+      .filter((p) => typeof p.id === 'number');
+  }
+
+  // Motivo para não comprar por causa dos PlayStyles exigidos, ou null.
+  function playStyleMismatch(itemStyles, required) {
+    if (!required || !required.length) return null;
+    if (!Array.isArray(itemStyles)) return 'não deu para confirmar os PlayStyles';
+    for (const req of required) {
+      const has = itemStyles.find((p) => p.id === req.id);
+      if (!has) return 'sem ' + playStyleName(req.id, req.plus);
+      if (req.plus && !has.plus) return 'tem ' + playStyleName(req.id) + ' mas não o +';
+    }
+    return null;
+  }
+
   // Tipo do alvo: define o que a busca procura e o que o bot aceita comprar.
   const KINDS = [['player', 'Jogador'], ['chemstyle', 'Consumível: estilo de química']];
 
@@ -229,7 +282,7 @@
     return !!(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length) ||
       PLAYER_FILTER_KEYS.some((k) => !isEmptyValue(c[k])) ||
       (Array.isArray(c.rarities) && c.rarities.length) ||
-      (target && (target.minRating > 0 || target.maxRating > 0)));
+      (target && (target.minRating > 0 || target.maxRating > 0 || (target.playStyles || []).length > 0)));
   }
 
   // Motivo para não aceitar o alvo, ou null se está tudo certo.
@@ -270,34 +323,60 @@
     }
     if (target.kind === 'player') {
       if (it.kind !== 'player') return 'não é jogador';
-      const need = (want, got, label) => {
+      const need = (want, got, article, noun) => {
         if (isEmptyValue(want)) return null;
-        if (got == null) return 'não deu para confirmar ' + label;
-        return got === want ? null : label + ' diferente';
+        if (got == null) return 'não deu para confirmar ' + article + ' ' + noun;
+        return got === want ? null : noun + ' diferente';
       };
       if (!isEmptyValue(c.position)) {
         const pos = positionsOf(it);
         if (!pos.length) return 'não deu para confirmar a posição';
         if (!pos.includes(String(c.position).toUpperCase())) return 'posição diferente';
       }
-      return need(c.playStyle, it.playStyle, 'a química') ||
-        need(c.club, it.teamId, 'o clube') ||
-        need(c.league, it.leagueId, 'a liga') ||
-        need(c.nation, it.nationId, 'o país') ||
+      return need(c.playStyle, it.playStyle, 'a', 'química') ||
+        need(c.club, it.teamId, 'o', 'time') ||
+        need(c.league, it.leagueId, 'a', 'liga') ||
+        need(c.nation, it.nationId, 'o', 'país') ||
         (target.minRating > 0 && !(it.rating >= target.minRating) ? 'nota abaixo do mínimo' : null) ||
-        (target.maxRating > 0 && !(it.rating <= target.maxRating) ? 'nota acima do máximo' : null);
+        (target.maxRating > 0 && !(it.rating <= target.maxRating) ? 'nota acima do máximo' : null) ||
+        playStyleMismatch(it.playStyles, target.playStyles);
     }
     return 'alvo sem tipo definido';
   }
 
-  function describeTarget(t) {
+  // Nomes de time/liga/país/jogador: primeiro os guardados no alvo, depois o
+  // serviço de nomes do Web App; só em último caso o número.
+  function nameFor(kind, id, labels, names) {
+    if (!(id > 0)) return '';
+    if (labels && labels[kind]) return labels[kind];
+    const fn = names && names[kind];
+    const n = typeof fn === 'function' ? fn(id) : null;
+    if (n) return n;
+    return { club: 'time', league: 'liga', nation: 'país', player: 'jogador' }[kind] + ' #' + id;
+  }
+
+  // Partes legíveis do alvo, na ordem em que aparecem no cartão.
+  function targetParts(t, names) {
     const c = t.criteria || {};
-    if (t.kind === 'chemstyle') return 'CONSUMÍVEL · estilo ' + (c.playStyle > 0 ? chemStyleName(c.playStyle) : '?');
-    let text = (t.kind === 'player' ? 'JOGADOR · ' : 'TIPO NÃO DEFINIDO · ') + describeCriteria(c);
-    if (t.minRating > 0 || t.maxRating > 0) {
-      text += ' · nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?');
-    }
-    return text;
+    const labels = t.labels || {};
+    if (t.kind === 'chemstyle') return [c.playStyle > 0 ? 'Estilo ' + chemStyleName(c.playStyle) : 'Estilo ?'];
+    const parts = [];
+    if (c.maskedDefId) parts.push(nameFor('player', c.maskedDefId, labels, names));
+    if (c.position && c.position !== 'any') parts.push(c.position);
+    if (c.playStyle > 0) parts.push('Química ' + chemStyleName(c.playStyle));
+    if (c.club > 0) parts.push(nameFor('club', c.club, labels, names));
+    if (c.league > 0) parts.push(nameFor('league', c.league, labels, names));
+    if (c.nation > 0) parts.push(nameFor('nation', c.nation, labels, names));
+    if (c.level && c.level !== 'any') parts.push((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level);
+    (t.playStyles || []).forEach((p) => parts.push(playStyleName(p.id, p.plus)));
+    if (t.minRating > 0 || t.maxRating > 0) parts.push('Nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?'));
+    return parts;
+  }
+
+  function describeTarget(t, names) {
+    if (t.kind === 'chemstyle') return 'CONSUMÍVEL · ' + targetParts(t, names).join(' · ');
+    const parts = targetParts(t, names);
+    return (t.kind === 'player' ? 'JOGADOR · ' : 'TIPO NÃO DEFINIDO · ') + (parts.join(' · ') || 'sem filtros');
   }
 
   function describeCriteria(c) {
@@ -319,9 +398,150 @@
     if (it.kind === 'training') return 'consumível ' + it.name;
     const extra = [];
     if (it.playStyle > 0) extra.push('química ' + chemStyleName(it.playStyle));
+    (it.playStyles || []).filter((p) => p.plus).forEach((p) => extra.push(playStyleName(p.id, true)));
     const pos = positionsOf(it)[0];
     if (pos) extra.push(pos);
     return it.name + (it.rating ? ' ' + it.rating : '') + (extra.length ? ' (' + extra.join(', ') + ')' : '');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Nomes de times, ligas, países e jogadores
+  // ---------------------------------------------------------------------------
+
+  // O Web App traz as traduções dos nomes; as chaves seguem o padrão
+  // global.teamFull.<ano>.team<id>, global.leagueFull.<ano>.league<id> e
+  // search.nationName.nation<id>. O ano é descoberto testando times conhecidos.
+  const NAME_KEYS = {
+    club: (y, id) => 'global.teamFull.' + y + '.team' + id,
+    league: (y, id) => 'global.leagueFull.' + y + '.league' + id,
+    nation: (y, id) => 'search.nationName.nation' + id,
+  };
+  const NAME_SCAN = { nation: 300, league: 2500, club: 135000 };
+  const PROBE = { club: [243, 241, 11, 1, 5], league: [13, 53, 16, 19, 31], nation: [54, 14, 18, 21, 52] };
+
+  function validName(name, key) {
+    return typeof name === 'string' && name.trim() !== '' && name !== key && !/^(global|search)\./.test(name) && !/\.(team|league|nation)\d+$/.test(name);
+  }
+
+  function createNameService(getLocalize, opts) {
+    opts = opts || {};
+    const yearsToTry = opts.years || [2027, 2026, 2028, 2025, 2024];
+    let year = null;
+    const cache = { club: new Map(), league: new Map(), nation: new Map() };
+    const lists = {};
+    const loading = {};
+
+    function localize() {
+      const fn = getLocalize();
+      return typeof fn === 'function' ? fn : null;
+    }
+
+    function lookup(kind, id, y) {
+      const loc = localize();
+      if (!loc) return null;
+      const key = NAME_KEYS[kind](y, id);
+      let name;
+      try { name = loc(key); } catch (e) { name = null; }
+      return validName(name, key) ? name : null;
+    }
+
+    function detectYear() {
+      if (year) return year;
+      for (const y of yearsToTry) {
+        if (PROBE.club.some((id) => lookup('club', id, y))) { year = y; return y; }
+      }
+      return null;
+    }
+
+    function name(kind, id) {
+      if (!(id > 0)) return null;
+      if (cache[kind].has(id)) return cache[kind].get(id);
+      const y = kind === 'nation' ? 0 : detectYear();
+      if (kind !== 'nation' && !y) return null;
+      const n = lookup(kind, id, y);
+      if (n) cache[kind].set(id, n);
+      return n;
+    }
+
+    // Lista completa (id, nome), montada aos poucos para não travar a tela.
+    function list(kind) {
+      if (lists[kind]) return Promise.resolve(lists[kind]);
+      if (loading[kind]) return loading[kind];
+      loading[kind] = new Promise((resolve) => {
+        if (!localize() || (kind !== 'nation' && !detectYear())) {
+          loading[kind] = null;
+          return resolve([]);
+        }
+        const out = [];
+        const max = (opts.scan && opts.scan[kind]) || NAME_SCAN[kind];
+        const step = opts.chunk || 4000;
+        let id = 1;
+        const tick = () => {
+          const end = Math.min(max, id + step);
+          for (; id <= end; id++) {
+            const n = name(kind, id);
+            if (n) out.push({ id, name: n });
+          }
+          if (id <= max) return setTimeout(tick, 0);
+          out.sort((a, b) => a.name.localeCompare(b.name));
+          lists[kind] = out;
+          resolve(out);
+        };
+        tick();
+      });
+      return loading[kind];
+    }
+
+    return {
+      available: () => !!localize() && (!!detectYear() || PROBE.nation.some((id) => lookup('nation', id, 0))),
+      club: (id) => name('club', id),
+      league: (id) => name('league', id),
+      nation: (id) => name('nation', id),
+      list,
+      year: () => year,
+    };
+  }
+
+  function searchByName(list, query, limit) {
+    const q = normalizeName(query);
+    if (!q) return [];
+    const starts = [];
+    const contains = [];
+    for (const item of list) {
+      const n = normalizeName(item.name);
+      if (n.startsWith(q)) starts.push(item);
+      else if (n.includes(q)) contains.push(item);
+      if (starts.length >= (limit || 12)) break;
+    }
+    return starts.concat(contains).slice(0, limit || 12);
+  }
+
+  // Lista de jogadores que o próprio Web App baixa para a busca por nome
+  // (players.json: { Players: [{ id, f, l, c, r }], LegendsPlayers: [...] }).
+  function parsePlayersDb(json) {
+    const out = [];
+    const seen = new Set();
+    for (const group of [json && json.Players, json && json.LegendsPlayers]) {
+      for (const p of group || []) {
+        if (!p || !(p.id > 0) || seen.has(p.id)) continue;
+        seen.add(p.id);
+        const full = [p.f, p.l].filter(Boolean).join(' ');
+        out.push({ id: p.id, name: p.c || full || String(p.id), full, rating: p.r || 0 });
+      }
+    }
+    return out;
+  }
+
+  function searchPlayers(db, query, limit) {
+    const q = normalizeName(query);
+    if (q.length < 2) return [];
+    const hits = db.filter((p) => normalizeName(p.name).includes(q) || normalizeName(p.full).includes(q));
+    hits.sort((a, b) => {
+      const as = normalizeName(a.name).startsWith(q) ? 0 : 1;
+      const bs = normalizeName(b.name).startsWith(q) ? 0 : 1;
+      return as - bs || b.rating - a.rating;
+    });
+    return hits.slice(0, limit || 12);
   }
 
   // ---------------------------------------------------------------------------
@@ -931,6 +1151,33 @@
     return String(raw.definitionId);
   }
 
+  // Busca de jogadores por nome usando a lista que o Web App já baixou.
+  function createPlayersDb(adapter, win) {
+    let db = null;
+    let loading = null;
+    function load() {
+      if (db) return Promise.resolve(db);
+      if (loading) return loading;
+      const url = adapter.playersDbUrl();
+      if (!url || typeof win.fetch !== 'function') return Promise.resolve(null);
+      loading = win.fetch(url, { credentials: 'same-origin' })
+        .then((r) => r.json())
+        .then((json) => { db = parsePlayersDb(json); return db; })
+        .catch(() => null)
+        .then((result) => { loading = null; return result; });
+      return loading;
+    }
+    return {
+      search(query) {
+        return load().then((d) => (d && d.length ? { ok: true, list: searchPlayers(d, query, 15) } : { ok: false, list: [] }));
+      },
+      name(id) {
+        const p = db && db.find((x) => x.id === id);
+        return p ? p.name : null;
+      },
+    };
+  }
+
   function cardFromItems(items) {
     const it = (items || []).find((x) => x.kind == null || x.kind === 'player');
     if (!it || !it.definitionId) return null;
@@ -1224,6 +1471,7 @@
         nationId: field(raw, 'nationId'),
         position: any(raw, 'preferredPosition'),
         positions: list(raw, 'possiblePositions'),
+        playStyles: readPlayStyles(raw),
       };
     }
 
@@ -1262,6 +1510,17 @@
           ['UTSearchCriteriaDTO', typeof G('UTSearchCriteriaDTO') === 'function'],
           ['saldo de moedas', this.getCoins() != null],
         ];
+      },
+
+      // Endereço do players.json que o próprio Web App já baixou.
+      playersDbUrl() {
+        try {
+          const entries = win.performance.getEntriesByType('resource');
+          const hit = entries.map((e) => e.name).filter((n) => /players[^/]*\.json/i.test(n)).pop();
+          return hit || null;
+        } catch (e) {
+          return null;
+        }
       },
 
       localize() {
@@ -1400,8 +1659,8 @@
 #fcab-panel{position:fixed;right:8px;bottom:8px;z-index:2147483647;width:min(380px,calc(100vw - 16px));max-height:78vh;overflow:auto;background:#15171c;color:#e8e8e8;border:1px solid #333;border-radius:12px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
 #fcab-panel[hidden]{display:none}
 #fcab-panel *{box-sizing:border-box}
-#fcab-panel .h{display:flex;gap:6px;align-items:center;padding:10px;border-bottom:1px solid #2a2d33;position:sticky;top:0;background:#15171c}
-#fcab-panel .st{flex:1;font-weight:600}
+#fcab-panel .h{display:flex;gap:6px;align-items:center;padding:10px;border-bottom:1px solid #2a2d33;position:sticky;top:0;background:#15171c;z-index:10}
+#fcab-panel .st{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #fcab-panel .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:#777}
 #fcab-panel button{font:inherit;border:0;border-radius:8px;padding:8px 10px;background:#2a2d33;color:#e8e8e8}
 #fcab-panel button:disabled{opacity:.4}
@@ -1420,6 +1679,46 @@
 #fcab-panel input[type=text],#fcab-panel input:not([type]){width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
 #fcab-panel select{width:100%;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff}
 #fcab-panel .fb{margin-top:4px}
+#fcab-panel .card{background:#1b1e24;border:1px solid #2a2d33;border-radius:12px;padding:10px;margin:8px 0}
+#fcab-panel .card.on{border-color:#1db954}
+#fcab-panel .card-h{font-weight:700;font-size:15px;margin-bottom:4px}
+#fcab-panel .newcard{border-style:dashed}
+#fcab-panel .captured{font-size:12px;color:#cfd3da;background:#12151a;border-radius:8px;padding:6px 8px;margin:6px 0}
+#fcab-panel .tg-top{display:flex;align-items:center;gap:8px}
+#fcab-panel .tg-title{flex:1;min-width:0}
+#fcab-panel .tg-title .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fcab-panel button.icon{padding:6px 9px;background:#262a31}
+#fcab-panel .pill{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:1px 8px;margin-top:2px}
+#fcab-panel .pill-player{background:#12344d;color:#6fc3ff}
+#fcab-panel .pill-chem{background:#2e2048;color:#c7a6ff}
+#fcab-panel .pill-none{background:#4a1d1d;color:#ff8f8f}
+#fcab-panel .tags{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0 4px}
+#fcab-panel .tag{background:#262a31;color:#dfe3ea;border-radius:6px;padding:2px 7px;font-size:12px}
+#fcab-panel .sw{position:relative;display:inline-block;width:40px;height:24px;flex:none}
+#fcab-panel .sw input{opacity:0;width:0;height:0}
+#fcab-panel .sw span{position:absolute;inset:0;background:#3b3f47;border-radius:999px;transition:.2s}
+#fcab-panel .sw span:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+#fcab-panel .sw input:checked+span{background:#1db954}
+#fcab-panel .sw input:checked+span:before{transform:translateX(16px)}
+#fcab-panel .sw input:disabled+span{opacity:.35}
+#fcab-panel .ed-sec{margin:10px 0}
+#fcab-panel .ed-h{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#9aa3b2;margin-bottom:6px}
+#fcab-panel .chips{display:flex;flex-wrap:wrap;gap:6px}
+#fcab-panel .seg{display:flex;gap:6px}
+#fcab-panel .seg .chip{flex:1}
+#fcab-panel .chip{padding:7px 10px;border-radius:999px;background:#262a31;border:1px solid #333842;font-size:13px}
+#fcab-panel .chip.on{background:#1d4d33;border-color:#1db954;color:#fff}
+#fcab-panel .chip.plus{background:#4d3d12;border-color:#ffd24d;color:#ffe9a6}
+#fcab-panel .ps-group{margin:6px 0}
+#fcab-panel .ps-g{font-size:11px;color:#8a93a3;margin:4px 0}
+#fcab-panel details summary{cursor:pointer;color:#6fc3ff;font-size:13px;margin-bottom:4px}
+#fcab-panel .sel{display:flex;align-items:center;gap:8px;background:#1d4d33;border:1px solid #1db954;border-radius:999px;padding:4px 4px 4px 12px}
+#fcab-panel .sel span{flex:1;font-weight:600}
+#fcab-panel .sel button{padding:4px 9px;border-radius:999px}
+#fcab-panel .results{display:flex;flex-direction:column;gap:2px;margin-top:4px;max-height:200px;overflow:auto}
+#fcab-panel .results button{text-align:left;background:#12151a;border-radius:6px;padding:8px}
+#fcab-panel .results small{color:#9aa3b2;margin-left:6px}
+#fcab-panel .ed-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 #fcab-panel .fe{margin:6px 0}
 #fcab-panel .fe [hidden]{display:none}
 #fcab-panel .kind{font-weight:700;font-size:13px;margin:4px 0}
@@ -1465,6 +1764,8 @@
   function createUI(win, deps) {
     const doc = win.document;
     const { app, store, engine, adapter, futbin } = deps;
+    const names = deps.names || {};
+    const players = deps.players || { search: () => Promise.resolve({ ok: false, list: [] }) };
     const logs = [];
     let tab = 'targets';
 
@@ -1498,20 +1799,23 @@
       </div>
       <section data-pane="targets">
         <div data-el="targets"></div>
-        <h4 style="margin:12px 0 4px">Novo alvo</h4>
-        <p class="hint">Jeito fácil: feche este painel, vá em <b>Transferências → Pesquisar no mercado</b>, escolha o jogador e os filtros e toque em Pesquisar. A busca aparece aqui embaixo automaticamente.</p>
-        <p class="hint" data-el="captured">Nenhuma busca capturada ainda.</p>
-        <p class="hint" data-el="capturedPrice"></p>
-        <div data-el="newFilters"></div>
-        <label>Ou ID do jogador na EA (deixe vazio para usar a busca capturada)</label>
-        <input data-el="newId" inputmode="numeric">
-        <label>Nome (só pra você identificar)</label>
-        <input data-el="newName">
-        <label>Preço máximo de compra</label>
-        <input data-el="newMax" inputmode="numeric">
-        <label>Preço de revenda (opcional, vazio = não revende)</label>
-        <input data-el="newSell" inputmode="numeric">
-        <button class="go full" data-act="add">Adicionar alvo</button>
+        <div class="card newcard">
+          <div class="card-h">＋ Novo alvo</div>
+          <p class="hint">Monte os filtros abaixo, ou faça uma busca em <b>Transferências → Pesquisar no mercado</b> do Web App: ela aparece aqui já preenchida.</p>
+          <div class="captured" data-el="captured">Nenhuma busca capturada ainda.</div>
+          <p class="hint" data-el="capturedPrice"></p>
+          <div data-el="newFilters"></div>
+          <div class="ed-sec">
+            <div class="ed-h">Nome e preços</div>
+            <label>Nome (só pra você identificar)</label>
+            <input data-el="newName" placeholder="Ex.: Zagueiro Shadow">
+            <div class="grid">
+              <div><label>Compra até</label><input data-el="newMax" inputmode="numeric" placeholder="Ex.: 5000"></div>
+              <div><label>Revende por (opcional)</label><input data-el="newSell" inputmode="numeric" placeholder="vazio = não revende"></div>
+            </div>
+          </div>
+          <button class="go full" data-act="add">Adicionar alvo</button>
+        </div>
       </section>
       <section data-pane="settings" hidden>
         <div data-el="settings"></div>
@@ -1573,94 +1877,222 @@
 
     function renderTargets() {
       const box = el('targets');
+      editors.forEach((ed, id) => { if (!app.state.targets.some((t) => t.id === id)) editors.delete(id); });
       if (!app.state.targets.length) {
-        box.innerHTML = '<p class="hint">Nenhum alvo ainda. Adicione um abaixo.</p>';
+        box.innerHTML = '<p class="hint">Nenhum alvo ainda. Crie um abaixo.</p>';
         return;
       }
-      box.innerHTML = app.state.targets.map((t) => `
-        <div class="tg" data-id="${escapeHtml(t.id)}">
-          <div class="row">
-            <input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''} ${t.needsReview || targetProblem(t) ? 'disabled' : ''}>
-            <span class="name">${escapeHtml(t.name)}</span>
-            <button data-f="remove">🗑</button>
+      box.innerHTML = app.state.targets.map((t) => {
+        const problem = t.needsReview
+          ? 'Alvo criado numa versão antiga: confira o tipo e os filtros em ✎ e salve para poder ativar.'
+          : targetProblem(t) ? 'Não pode rodar: ' + targetProblem(t) + '.' : '';
+        const kindPill = t.kind === 'chemstyle' ? '<span class="pill pill-chem">Consumível</span>'
+          : t.kind === 'player' ? '<span class="pill pill-player">Jogador</span>'
+          : '<span class="pill pill-none">Sem tipo</span>';
+        const tags = targetParts(t, names).map((x) => '<span class="tag">' + escapeHtml(x) + '</span>').join('');
+        return `
+        <div class="tg card${t.enabled ? ' on' : ''}" data-id="${escapeHtml(t.id)}">
+          <div class="tg-top">
+            <label class="sw"><input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''} ${problem ? 'disabled' : ''}><span></span></label>
+            <div class="tg-title"><div class="name">${escapeHtml(t.name)}</div>${kindPill}</div>
+            <button class="icon" data-f="editFilters" title="Editar filtros">✎</button>
+            <button class="icon" data-f="remove" title="Excluir">🗑</button>
           </div>
-          <div class="kind kind-${escapeHtml(t.kind || 'none')}">${escapeHtml(describeTarget(t))}</div>
-          ${t.needsReview || targetProblem(t) ? '<div class="warnbox">⚠️ ' + escapeHtml(t.needsReview
-            ? 'Alvo criado numa versão antiga: confira o tipo e os filtros em ✎ Filtros e salve para poder ativar.'
-            : 'Não pode rodar: ' + targetProblem(t) + '.') + '</div>' : ''}
-          <button data-f="editFilters">✎ Filtros</button>
-          <div class="fe-box" data-fe-for="${escapeHtml(t.id)}" hidden></div>
+          <div class="tags">${tags || '<span class="tag">sem filtros</span>'}</div>
+          ${problem ? '<div class="warnbox">⚠️ ' + escapeHtml(problem) + '</div>' : ''}
+          <div class="fe-box" hidden></div>
           ${t.kind === 'player' ? '<div class="fb">' + futbinLine(t) + '</div>' : ''}
           <div class="grid">
             <div><label>Compra até</label><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"></div>
             <div><label>Revende por</label><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"></div>
           </div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     }
 
-    // Editor de filtros (usado no "Novo alvo" e em cada alvo). O tipo vem
-    // primeiro e decide quais campos aparecem: consumível só tem o estilo.
-    function filterEditorHtml(kind, c, t) {
-      c = c || {};
-      t = t || {};
-      const opt = (value, label, current) =>
-        '<option value="' + escapeHtml(value) + '"' + (String(current) === String(value) ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
-      const styleOptions = (current) => Object.keys(chemStyles).map(Number).sort((a, b) => a - b)
-        .map((id) => opt(id, chemStyles[id], current)).join('');
-      const num = (v) => (v > 0 ? v : '');
-      const hide = (k) => (kind === k ? '' : ' hidden');
-      return '<div class="fe">' +
-        '<label>Tipo do alvo (obrigatório)</label><select data-fe="kind">' +
-        opt('', '— escolha —', kind || '') + KINDS.map((k) => opt(k[0], k[1], kind)).join('') + '</select>' +
-        '<div data-kind="chemstyle"' + hide('chemstyle') + '>' +
-        '<label>Qual estilo de química (a carta consumível)</label><select data-fe="consumableStyle">' +
-        opt('0', '— escolha —', c.playStyle || 0) + styleOptions(c.playStyle) + '</select>' +
-        '<p class="hint">Compra só a carta de consumível. Jogadores são sempre ignorados.</p></div>' +
-        '<div data-kind="player"' + hide('player') + '>' +
-        '<div class="grid">' +
-        '<div><label>Posição</label><select data-fe="position">' + opt('any', 'Qualquer', c.position || 'any') +
-        POSITIONS.map((p) => opt(p, p, c.position)).join('') + '</select></div>' +
-        '<div><label>Química aplicada no jogador</label><select data-fe="playStyle">' + opt('0', 'Qualquer', c.playStyle || 0) +
-        styleOptions(c.playStyle) + '</select></div>' +
-        '<div><label>Nível</label><select data-fe="level">' + opt('any', 'Qualquer', c.level || 'any') +
-        LEVELS.map((l) => opt(l[0], l[1], c.level)).join('') + '</select></div>' +
-        '<div><label>Clube / time (ID)</label><input data-fe="club" inputmode="numeric" value="' + num(c.club) + '"></div>' +
-        '<div><label>Liga (ID)</label><input data-fe="league" inputmode="numeric" value="' + num(c.league) + '"></div>' +
-        '<div><label>País (ID)</label><input data-fe="nation" inputmode="numeric" value="' + num(c.nation) + '"></div>' +
-        '<div><label>Nota mínima</label><input data-fe="minRating" inputmode="numeric" value="' + num(t.minRating) + '"></div>' +
-        '<div><label>Nota máxima</label><input data-fe="maxRating" inputmode="numeric" value="' + num(t.maxRating) + '"></div>' +
-        '</div>' +
-        '<p class="hint">Compra só jogadores. Time, liga e país: escolha pelo nome na busca do Web App (Transferências → ' +
-        'Pesquisar → Jogadores) que o ID vem preenchido. Antes de comprar, o bot confere posição, química, time, liga, ' +
-        'país e nota; se não conseguir confirmar algum, não compra.</p></div>' +
-        '<p class="hint">Estilos de química: ' + chemStylesSource + '.</p></div>';
-    }
+    // Editor de filtros (usado no "Novo alvo" e em cada alvo). Tudo por nome:
+    // botões para tipo, posição, nível, química e PlayStyles; busca por nome
+    // para jogador, time, liga e país.
+    const PICKERS = [['player', 'Jogador', 'Buscar jogador pelo nome…'], ['club', 'Time', 'Buscar time…'],
+      ['league', 'Liga', 'Buscar liga…'], ['nation', 'País', 'Buscar país…']];
 
-    function readFilterEditor(box) {
-      const values = {};
-      box.querySelectorAll('[data-fe]').forEach((input) => {
-        const key = input.dataset.fe;
-        values[key] = input.tagName === 'SELECT' ? input.value : parseCoins(input.value);
+    function createEditor(host) {
+      let st = null;
+
+      function load(kind, c, t, labels) {
+        c = c || {};
+        t = t || {};
+        const style = c.playStyle > 0 ? c.playStyle : 0;
+        st = {
+          kind: kind || null,
+          base: Object.assign({}, c),
+          player: c.maskedDefId || 0,
+          position: c.position && c.position !== 'any' ? c.position : '',
+          chem: kind === 'chemstyle' ? 0 : style,
+          consumable: kind === 'player' ? 0 : style,
+          level: c.level && c.level !== 'any' ? c.level : '',
+          club: c.club > 0 ? c.club : 0,
+          league: c.league > 0 ? c.league : 0,
+          nation: c.nation > 0 ? c.nation : 0,
+          labels: Object.assign({}, t.labels || {}, labels || {}),
+          minRating: t.minRating || 0,
+          maxRating: t.maxRating || 0,
+          playStyles: (t.playStyles || []).map((p) => ({ id: p.id, plus: !!p.plus })),
+          query: {},
+        };
+        render();
+      }
+
+      function label(kind) {
+        return nameFor(kind, st[kind], st.labels, names);
+      }
+
+      function chip(attr, value, text, on, extra) {
+        return '<button type="button" class="chip' + (on ? ' on' : '') + (extra ? ' ' + extra : '') + '" ' +
+          attr + '="' + escapeHtml(value) + '">' + escapeHtml(text) + '</button>';
+      }
+
+      function section(title, body, hint) {
+        return '<div class="ed-sec"><div class="ed-h">' + escapeHtml(title) + '</div>' + body +
+          (hint ? '<p class="hint">' + hint + '</p>' : '') + '</div>';
+      }
+
+      function styleChips(attr, current, withAny) {
+        const ids = Object.keys(chemStyles).map(Number).sort((a, b) => a - b);
+        return '<div class="chips">' + (withAny ? chip(attr, '0', 'Qualquer', !current) : '') +
+          ids.map((id) => chip(attr, id, chemStyles[id], current === id)).join('') + '</div>';
+      }
+
+      function picker(kind, title, placeholder) {
+        if (st[kind]) {
+          return section(title, '<div class="sel"><span>' + escapeHtml(label(kind)) + '</span>' +
+            '<button type="button" data-ed-clear="' + kind + '">✕</button></div>');
+        }
+        return section(title, '<input data-ed-q="' + kind + '" placeholder="' + escapeHtml(placeholder) + '" value="' +
+          escapeHtml(st.query[kind] || '') + '" autocomplete="off"><div class="results" data-ed-res="' + kind + '"></div>');
+      }
+
+      function render() {
+        const short = { player: '👤 Jogador', chemstyle: '🧪 Consumível de química' };
+        const kindSeg = '<div class="seg">' + KINDS.map((k) => chip('data-ed-kind', k[0], short[k[0]], st.kind === k[0])).join('') + '</div>';
+        let html = section('O que comprar', kindSeg);
+        if (st.kind === 'chemstyle') {
+          html += section('Qual estilo de química', styleChips('data-ed-cons', st.consumable, false),
+            'Compra só a carta consumível. Jogadores são sempre ignorados.');
+        } else if (st.kind === 'player') {
+          html += PICKERS.slice(0, 1).map((p) => picker(p[0], p[1], p[2])).join('');
+          html += section('Posição', '<div class="chips">' + chip('data-ed-pos', '', 'Qualquer', !st.position) +
+            POSITIONS.map((p) => chip('data-ed-pos', p, p, st.position === p)).join('') + '</div>');
+          html += section('Química aplicada no jogador', styleChips('data-ed-chem', st.chem, true));
+          html += PICKERS.slice(1).map((p) => picker(p[0], p[1], p[2])).join('');
+          html += section('Nível', '<div class="chips">' + chip('data-ed-level', '', 'Qualquer', !st.level) +
+            LEVELS.map((l) => chip('data-ed-level', l[0], l[1], st.level === l[0])).join('') + '</div>');
+          const ps = PLAYSTYLE_GROUPS.map(([group, ids]) => '<div class="ps-group"><div class="ps-g">' + group + '</div><div class="chips">' +
+            ids.map((id) => {
+              const sel = st.playStyles.find((p) => p.id === id);
+              return chip('data-ed-ps', id, playStyleName(id, sel && sel.plus), !!sel, sel && sel.plus ? 'plus' : '');
+            }).join('') + '</div></div>').join('');
+          const count = st.playStyles.length ? ' (' + st.playStyles.length + ')' : '';
+          html += section('PlayStyles' + count, '<details' + (st.playStyles.length ? ' open' : '') + '><summary>Escolher PlayStyles</summary>' + ps + '</details>',
+            'Toque 1× = PlayStyle, 2× = PlayStyle+, 3× = remove. O bot só compra se a carta tiver todos.');
+          html += section('Nota', '<div class="grid"><div><label>Mínima</label><input data-ed-num="minRating" inputmode="numeric" value="' +
+            (st.minRating || '') + '"></div><div><label>Máxima</label><input data-ed-num="maxRating" inputmode="numeric" value="' +
+            (st.maxRating || '') + '"></div></div>');
+        } else {
+          html += '<p class="hint">Escolha acima se o alvo é um jogador ou um consumível.</p>';
+        }
+        host.innerHTML = '<div class="ed">' + html + '</div>';
+        PICKERS.forEach((p) => { if (st.query[p[0]]) updateResults(p[0]); });
+      }
+
+      function updateResults(kind) {
+        const box = host.querySelector('[data-ed-res="' + kind + '"]');
+        if (!box) return;
+        const q = st.query[kind] || '';
+        if (normalizeName(q).length < 2) { box.innerHTML = ''; return; }
+        const show = (list, emptyMsg) => {
+          if (st.query[kind] !== q) return;
+          box.innerHTML = list.length
+            ? list.map((x) => '<button type="button" data-ed-pick="' + kind + '" data-id="' + x.id + '" data-name="' +
+              escapeHtml(x.name) + '">' + escapeHtml(x.name) + (x.rating ? ' <small>' + x.rating + '</small>' : '') + '</button>').join('')
+            : '<div class="hint">' + emptyMsg + '</div>';
+        };
+        box.innerHTML = '<div class="hint">Procurando…</div>';
+        const unavailable = kind === 'player'
+          ? 'Lista de jogadores do Web App indisponível. Pesquise o jogador no mercado do Web App que ele aparece aqui.'
+          : 'Nomes indisponíveis. Escolha pelo nome na busca do Web App que ele aparece aqui.';
+        const source = kind === 'player' ? players.search(q) : names.list(kind).then((list) => ({ ok: list.length > 0, list: searchByName(list, q, 15) }));
+        source.then((r) => show(r.ok ? r.list : [], r.ok ? 'Nada encontrado.' : unavailable))
+          .catch(() => show([], unavailable));
+      }
+
+      host.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b || !st) return;
+        const d = b.dataset;
+        if (d.edKind) { st.kind = d.edKind; }
+        else if (d.edPos != null) { st.position = d.edPos; }
+        else if (d.edLevel != null) { st.level = d.edLevel; }
+        else if (d.edChem != null) { st.chem = parseInt(d.edChem, 10) || 0; }
+        else if (d.edCons != null) { st.consumable = parseInt(d.edCons, 10) || 0; }
+        else if (d.edPs != null) {
+          const id = parseInt(d.edPs, 10);
+          const cur = st.playStyles.find((p) => p.id === id);
+          if (!cur) st.playStyles.push({ id, plus: false });
+          else if (!cur.plus) cur.plus = true;
+          else st.playStyles = st.playStyles.filter((p) => p.id !== id);
+        }
+        else if (d.edClear) { st[d.edClear] = 0; delete st.labels[d.edClear]; }
+        else if (d.edPick) {
+          st[d.edPick] = parseInt(d.id, 10);
+          st.labels[d.edPick] = d.name;
+          st.query[d.edPick] = '';
+        }
+        else return;
+        e.preventDefault();
+        render();
       });
-      return values;
-    }
 
-    // Monta tipo + critérios a partir do editor. base = busca capturada ou alvo atual.
-    function targetFromEditor(box, base) {
-      const values = readFilterEditor(box);
-      const kind = values.kind || null;
-      const forKind = kind === 'chemstyle' ? Object.assign({}, values, { playStyle: values.consumableStyle }) : values;
-      const player = kind === 'player';
+      host.addEventListener('input', (e) => {
+        if (!st) return;
+        const q = e.target.dataset.edQ;
+        if (q) { st.query[q] = e.target.value; updateResults(q); return; }
+        const n = e.target.dataset.edNum;
+        if (n) st[n] = parseCoins(e.target.value);
+      });
+
       return {
-        kind,
-        criteria: kind ? criteriaForKind(kind, base, forKind) : Object.assign({}, base),
-        minRating: player ? values.minRating || 0 : 0,
-        maxRating: player ? values.maxRating || 0 : 0,
+        load,
+        setLabel(kind, text) { if (st && text) { st.labels[kind] = text; render(); } },
+        value() {
+          const kind = st.kind;
+          const values = kind === 'chemstyle' ? { playStyle: st.consumable }
+            : { position: st.position || 'any', playStyle: st.chem || 0, level: st.level || 'any', club: st.club, league: st.league, nation: st.nation };
+          const criteria = kind ? criteriaForKind(kind, st.base, values) : Object.assign({}, st.base);
+          const labels = {};
+          if (kind === 'player') {
+            if (st.player) criteria.maskedDefId = st.player;
+            else delete criteria.maskedDefId;
+            if (st.player !== (st.base.maskedDefId || 0)) delete criteria.defId;
+            ['player', 'club', 'league', 'nation'].forEach((k) => { if (st[k] && st.labels[k]) labels[k] = st.labels[k]; });
+          }
+          return {
+            kind,
+            criteria,
+            labels,
+            minRating: kind === 'player' ? st.minRating || 0 : 0,
+            maxRating: kind === 'player' ? st.maxRating || 0 : 0,
+            playStyles: kind === 'player' ? st.playStyles.map((p) => ({ id: p.id, plus: p.plus })) : [],
+          };
+        },
       };
     }
 
+    const editors = new Map();
+    const newEditor = createEditor(el('newFilters'));
+
     function renderNewFilters() {
-      el('newFilters').innerHTML = filterEditorHtml(kindFromCriteria(app.captured), app.captured, null);
+      newEditor.load(kindFromCriteria(app.captured), app.captured, null, app.capturedLabels);
     }
 
     function futbinLine(t) {
@@ -1730,15 +2162,22 @@
       if (kind !== 'player') card = null;
       app.captured = criteria;
       app.capturedCard = card || null;
-      if (!card) renderNewFilters();
-      const kindText = kind ? kindLabel(kind).toUpperCase() : 'TIPO NÃO RECONHECIDO (escolha abaixo)';
-      const label = (card ? card.name + ' ' + (card.rating || '') + ' · ' : '') + describeCriteria(criteria);
-      el('captured').innerHTML = 'Busca capturada: <b>' + escapeHtml(kindText) + '</b> · ' + escapeHtml(label);
+      if (!card) {
+        app.capturedLabels = {};
+        renderNewFilters();
+      } else {
+        app.capturedLabels = { player: card.name };
+        newEditor.setLabel('player', card.name);
+      }
+      const kindText = kind ? kindLabel(kind) : 'Tipo não reconhecido: escolha abaixo';
+      const parts = targetParts({ kind, criteria, labels: app.capturedLabels }, names);
+      el('captured').innerHTML = '<b>Busca capturada:</b> ' + escapeHtml(kindText) +
+        (parts.length ? ' · ' + escapeHtml(parts.join(' · ')) : '');
       el('capturedPrice').textContent = card ? 'FUTBIN: buscando preço...' : '';
       if (!card) {
         if (!el('newName').value) {
           el('newName').value = kind === 'chemstyle' && criteria.playStyle > 0
-            ? 'Consumível ' + chemStyleName(criteria.playStyle) : describeCriteria(criteria);
+            ? 'Consumível ' + chemStyleName(criteria.playStyle) : parts.join(' ');
         }
         return;
       }
@@ -1758,9 +2197,7 @@
     }
 
     function addTarget() {
-      const id = parseCoins(el('newId').value);
-      const edited = targetFromEditor(el('newFilters'), id ? { type: 'player', maskedDefId: id } : (app.captured || {}));
-      if (id && edited.kind !== 'player') return win.alert('O ID de jogador só vale para o tipo "Jogador".');
+      const edited = newEditor.value();
       const maxBuy = parseCoins(el('newMax').value);
       const draft = Object.assign({}, edited, { maxBuy });
       const problem = targetProblem(draft);
@@ -1769,15 +2206,19 @@
       if (sellPrice && sellPrice <= maxBuy) {
         if (!win.confirm('O preço de revenda é menor ou igual ao de compra. Adicionar mesmo assim?')) return;
       }
-      const card = id || edited.kind !== 'player' ? null : app.capturedCard;
-      const summary = describeTarget(draft);
+      const sameCard = app.capturedCard && edited.criteria.maskedDefId &&
+        app.captured && app.captured.maskedDefId === edited.criteria.maskedDefId;
+      const card = edited.kind === 'player' && sameCard ? app.capturedCard : null;
+      const summary = describeTarget(draft, names);
       if (!win.confirm('Confirme o alvo:\n\n' + summary + '\nCompra até ' + fmt(maxBuy) +
         (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       app.state.targets.push({
         id: Date.now().toString(36),
-        name: el('newName').value.trim() || summary,
+        name: el('newName').value.trim() || targetParts(draft, names).join(' ') || summary,
         kind: edited.kind,
         criteria: edited.criteria,
+        labels: edited.labels,
+        playStyles: edited.playStyles,
         minRating: edited.minRating,
         maxRating: edited.maxRating,
         maxBuy,
@@ -1787,9 +2228,10 @@
         futbin: card && app.capturedFutbin && app.capturedCard === card ? app.capturedFutbin : null,
       });
       save();
-      ['newId', 'newName', 'newMax', 'newSell'].forEach((k) => { el(k).value = ''; });
+      ['newName', 'newMax', 'newSell'].forEach((k) => { el(k).value = ''; });
       app.captured = null;
       app.capturedCard = null;
+      app.capturedLabels = {};
       el('captured').textContent = 'Nenhuma busca capturada ainda.';
       el('capturedPrice').textContent = '';
       renderNewFilters();
@@ -1868,33 +2310,34 @@
         const box = tg.querySelector('.fe-box');
         box.hidden = !box.hidden;
         if (!box.hidden) {
-          box.innerHTML = filterEditorHtml(tgt.kind, tgt.criteria, tgt) +
-            '<button data-f="saveFilters">Salvar filtros</button> ' +
-            (app.captured ? '<button data-f="useCaptured">Usar a última busca do mercado</button>' : '');
+          box.innerHTML = '<div class="ed-host"></div><div class="ed-actions"><button class="go" data-f="saveFilters">Salvar filtros</button>' +
+            (app.captured ? '<button data-f="useCaptured">Usar a última busca do mercado</button>' : '') + '</div>';
+          const ed = createEditor(box.querySelector('.ed-host'));
+          ed.load(tgt.kind, tgt.criteria, tgt);
+          editors.set(tgt.id, ed);
         }
         return;
       }
       if (tgt && e.target.dataset.f === 'useCaptured' && app.captured) {
         // Só preenche o editor; nada muda até o usuário conferir e salvar.
-        const box = tg.querySelector('.fe-box');
-        box.dataset.base = JSON.stringify(app.captured);
-        box.querySelector('.fe').outerHTML = filterEditorHtml(kindFromCriteria(app.captured), app.captured, tgt);
+        const ed = editors.get(tgt.id);
+        if (ed) ed.load(kindFromCriteria(app.captured), app.captured, null, app.capturedLabels);
         log('Editor preenchido com a última busca. Confira o tipo e toque em Salvar filtros.', 'warn');
         return;
       }
       if (tgt && e.target.dataset.f === 'saveFilters') {
-        const box = tg.querySelector('.fe-box');
-        const base = box.dataset.base ? JSON.parse(box.dataset.base) : tgt.criteria;
-        const edited = targetFromEditor(box, base);
+        const ed = editors.get(tgt.id);
+        if (!ed) return;
+        const edited = ed.value();
         const draft = Object.assign({}, tgt, edited);
         const problem = targetProblem(draft);
         if (problem) return win.alert('Não dá para salvar: ' + problem + '.');
-        if (!win.confirm('Confirme o alvo:\n\n' + describeTarget(draft) + '\nCompra até ' + fmt(tgt.maxBuy))) return;
+        if (!win.confirm('Confirme o alvo:\n\n' + describeTarget(draft, names) + '\nCompra até ' + fmt(tgt.maxBuy))) return;
         Object.assign(tgt, edited, { needsReview: false });
         if (tgt.kind !== 'player') { tgt.card = null; tgt.futbin = null; }
         save();
         renderTargets();
-        log('Filtros de ' + tgt.name + ' salvos: ' + describeTarget(tgt) + '.', 'success');
+        log('Filtros de ' + tgt.name + ' salvos: ' + describeTarget(tgt, names) + '.', 'success');
         return;
       }
       if (tgt && e.target.dataset.f === 'futbin') {
@@ -1958,12 +2401,7 @@
         if (key === 'futbinMargin') renderTargets();
         return;
       }
-      if (e.target.dataset.fe === 'kind') {
-        const fe = e.target.closest('.fe');
-        fe.querySelectorAll('[data-kind]').forEach((sec) => { sec.hidden = sec.dataset.kind !== e.target.value; });
-        return;
-      }
-      if (e.target.dataset.fe) return;
+      if (e.target.closest('.ed')) return;
       const tg = e.target.closest('.tg');
       const f = e.target.dataset.f;
       if (!tg || !f) return;
@@ -2055,7 +2493,10 @@
         ui.onTargetCard(target);
       },
     });
-    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay });
+    const names = createNameService(() => adapter.localize());
+    const playersDb = createPlayersDb(adapter, win);
+    names.player = (id) => playersDb.name(id);
+    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay, names, players: playersDb });
     ui.log('Painel carregado. Aguardando o Web App...');
 
     const timer = setInterval(() => {
@@ -2080,6 +2521,8 @@
     eaMarketAverage, priceFieldsOf, withCircuitBreaker,
     kindFromCriteria, criteriaForKind, hasPlayerFilter, targetProblem, mismatchReason, describeTarget,
     describeItem, itemKindOf, migrateTarget, loadChemStyles, chemStyleName,
+    PLAYSTYLES, playStyleName, readPlayStyles, playStyleMismatch, targetParts, createNameService,
+    searchByName, parsePlayersDb, searchPlayers, validName,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -176,3 +176,29 @@ test('usa os nomes de química do jogo quando disponíveis', () => {
   assert.equal(ab.mismatchReason({ kind: 'training', name: 'Sombra' }, shadowConsumable), null);
   assert.equal(ab.mismatchReason({ kind: 'training', name: 'Shadow' }, shadowConsumable), null);
 });
+
+test('grupos de posição: defensores, meio-campistas e atacantes', () => {
+  assert.equal(ab.zoneInfo('defense')[1], 'Defensores');
+  assert.equal(ab.zoneInfo('defenders')[1], 'Defensores');
+  assert.equal(ab.zoneInfo('midfield')[1], 'Meio-campistas');
+  assert.equal(ab.zoneInfo('attacker')[1], 'Atacantes');
+  assert.equal(ab.zoneInfo(-1), null);
+  assert.equal(ab.zoneInfo('any'), null);
+
+  const c = ab.criteriaForKind('player', {}, { position: 'any', zone: 'defense', playStyle: '268' });
+  assert.deepEqual(c, { zone: 'defense', playStyle: 268, type: 'player' });
+
+  const t = { kind: 'player', criteria: { type: 'player', zone: 'defense' }, maxBuy: 9000 };
+  assert.equal(ab.targetProblem(t), null);
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'CB', positions: ['CB'] }, t), null);
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 5 }, t), null);
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'ST', positions: ['ST'] }, t), 'não é defensor');
+  assert.equal(ab.mismatchReason({ kind: 'player' }, t), 'não deu para confirmar a posição');
+  const mid = { kind: 'player', criteria: { type: 'player', zone: 'midfield' }, maxBuy: 9000 };
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'CAM' }, mid), null);
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'CB' }, mid), 'não é meio-campista');
+  // Valor de zona em formato desconhecido: vale o filtro da própria EA.
+  const raw = { kind: 'player', criteria: { type: 'player', zone: 7 }, maxBuy: 9000 };
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'ST' }, raw), null);
+  assert.deepEqual(ab.targetParts(t), ['Defensores']);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.8.0
+// @version      0.8.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.8.0';
+  const SCRIPT_VERSION = '0.8.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -178,6 +178,24 @@
     19: 'LAM', 20: 'RF', 21: 'CF', 22: 'LF', 23: 'RW', 24: 'RS', 25: 'ST', 26: 'LS', 27: 'LW',
   };
   const LEVELS = [['bronze', 'Bronze'], ['silver', 'Prata'], ['gold', 'Ouro'], ['SP', 'Especial']];
+  // Grupos de posição do filtro do Web App (Defenders / Midfielders / Attackers).
+  const ZONES = [
+    ['defense', 'Defensores', ['RB', 'LB', 'CB', 'RWB', 'LWB', 'SW', 'RCB', 'LCB'], 'defensor'],
+    ['midfield', 'Meio-campistas', ['CDM', 'CM', 'CAM', 'RM', 'LM', 'RDM', 'LDM', 'RCM', 'LCM', 'RAM', 'LAM'], 'meio-campista'],
+    ['attacker', 'Atacantes', ['ST', 'CF', 'RW', 'LW', 'RF', 'LF', 'RS', 'LS'], 'atacante'],
+  ];
+
+  // Aceita o valor que a EA usar para a zona ("defense", "defenders"...).
+  function zoneInfo(value) {
+    const v = String(value == null ? '' : value).toLowerCase();
+    if (!v || v === 'any' || v === '-1') return null;
+    return ZONES.find((z) => v === z[0] || v.startsWith(z[0].slice(0, 5))) || null;
+  }
+
+  function zoneLabel(value) {
+    const z = zoneInfo(value);
+    return z ? z[1] : 'Grupo de posição da busca';
+  }
   const DEFAULT_CHEM_STYLES = {
     250: 'Basic', 251: 'Sniper', 252: 'Finisher', 253: 'Deadeye', 254: 'Marksman', 255: 'Hawk',
     256: 'Artist', 257: 'Architect', 258: 'Powerhouse', 259: 'Maestro', 260: 'Engine', 261: 'Sentinel',
@@ -296,7 +314,7 @@
     return null;
   }
 
-  const PLAYER_FILTER_KEYS = ['position', 'playStyle', 'level', 'club', 'league', 'nation'];
+  const PLAYER_FILTER_KEYS = ['position', 'zone', 'playStyle', 'level', 'club', 'league', 'nation'];
   const PLAYER_ONLY_KEYS = ['position', 'zone', 'level', 'club', 'league', 'nation', 'maskedDefId', 'defId', 'rarities'];
   const NUMERIC_KEYS = ['playStyle', 'club', 'league', 'nation'];
 
@@ -388,6 +406,14 @@
         if (!pos.length) return 'não deu para confirmar a posição';
         if (!pos.includes(String(c.position).toUpperCase())) return 'posição diferente';
       }
+      // Grupo de posição: confere quando sabemos quais posições entram nele;
+      // se o valor for outro formato da EA, vale o filtro da própria busca.
+      const zone = isEmptyValue(c.zone) ? null : zoneInfo(c.zone);
+      if (zone) {
+        const pos = positionsOf(it);
+        if (!pos.length) return 'não deu para confirmar a posição';
+        if (!pos.some((p) => zone[2].includes(p))) return 'não é ' + zone[3];
+      }
       return need(c.playStyle, it.playStyle, 'a', 'química') ||
         need(c.club, it.teamId, 'o', 'time') ||
         need(c.league, it.leagueId, 'a', 'liga') ||
@@ -419,6 +445,7 @@
     const parts = [];
     if (c.maskedDefId) parts.push(nameFor('player', c.maskedDefId, labels, names));
     if (c.position && c.position !== 'any') parts.push(c.position);
+    if (!isEmptyValue(c.zone)) parts.push(zoneLabel(c.zone));
     if (c.playStyle > 0) parts.push('Química ' + chemStyleName(c.playStyle));
     if (c.club > 0) parts.push(nameFor('club', c.club, labels, names));
     if (c.league > 0) parts.push(nameFor('league', c.league, labels, names));
@@ -1996,6 +2023,7 @@
           base: Object.assign({}, c),
           player: c.maskedDefId || 0,
           position: c.position && c.position !== 'any' ? c.position : '',
+          zone: isEmptyValue(c.zone) ? '' : c.zone,
           chem: kind === 'chemstyle' ? 0 : style,
           consumable: kind === 'player' ? 0 : style,
           level: c.level && c.level !== 'any' ? c.level : '',
@@ -2050,8 +2078,14 @@
             'Compra só a carta consumível. Jogadores são sempre ignorados.');
         } else if (st.kind === 'player') {
           html += PICKERS.slice(0, 1).map((p) => picker(p[0], p[1], p[2])).join('');
-          html += section('Posição', '<div class="chips">' + chip('data-ed-pos', '', 'Qualquer', !st.position) +
-            POSITIONS.map((p) => chip('data-ed-pos', p, p, st.position === p)).join('') + '</div>');
+          const zoneOn = (z) => !st.position && zoneInfo(st.zone) === z;
+          const unknownZone = st.zone && !zoneInfo(st.zone);
+          html += section('Posição', '<div class="chips">' + chip('data-ed-pos', '', 'Qualquer', !st.position && !st.zone) +
+            ZONES.map((z) => chip('data-ed-zone', z[0], z[1], zoneOn(z))).join('') +
+            (unknownZone ? chip('data-ed-zone', st.zone, zoneLabel(st.zone), true) : '') +
+            '</div><div class="chips" style="margin-top:6px">' +
+            POSITIONS.map((p) => chip('data-ed-pos', p, p, st.position === p)).join('') + '</div>',
+            'Grupos iguais ao filtro do Web App: Defensores, Meio-campistas e Atacantes. Ou escolha uma posição exata.');
           html += section('Química aplicada no jogador', styleChips('data-ed-chem', st.chem, true));
           html += PICKERS.slice(1).map((p) => picker(p[0], p[1], p[2])).join('');
           html += section('Nível', '<div class="chips">' + chip('data-ed-level', '', 'Qualquer', !st.level) +
@@ -2103,7 +2137,8 @@
         if (!b || !st) return;
         const d = b.dataset;
         if (d.edKind) { st.kind = d.edKind; }
-        else if (d.edPos != null) { st.position = d.edPos; }
+        else if (d.edPos != null) { st.position = d.edPos; st.zone = ''; }
+        else if (d.edZone != null) { st.zone = d.edZone; st.position = ''; }
         else if (d.edLevel != null) { st.level = d.edLevel; }
         else if (d.edChem != null) { st.chem = parseInt(d.edChem, 10) || 0; }
         else if (d.edCons != null) { st.consumable = parseInt(d.edCons, 10) || 0; }
@@ -2141,7 +2176,7 @@
         value() {
           const kind = st.kind;
           const values = kind === 'chemstyle' ? { playStyle: st.consumable }
-            : { position: st.position || 'any', playStyle: st.chem || 0, level: st.level || 'any', club: st.club, league: st.league, nation: st.nation };
+            : { position: st.position || 'any', zone: st.position ? 'any' : (st.zone || 'any'), playStyle: st.chem || 0, level: st.level || 'any', club: st.club, league: st.league, nation: st.nation };
           let criteria = kind ? criteriaForKind(kind, st.base, values) : Object.assign({}, st.base);
           const field = psField();
           criteria = applyPsPlus(criteria, kind === 'player' && st.psPlus, field);
@@ -2618,7 +2653,7 @@
     describeItem, itemKindOf, migrateTarget, loadChemStyles, chemStyleName,
     PLAYSTYLES, playStyleName, readPlayStyles, playStyleMismatch, targetParts, createNameService,
     searchByName, parsePlayersDb, searchPlayers, validName,
-    learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch,
+    learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

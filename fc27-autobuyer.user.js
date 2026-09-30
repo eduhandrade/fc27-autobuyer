@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.7.0
+// @version      0.8.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.7.0';
+  const SCRIPT_VERSION = '0.8.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -100,7 +100,54 @@
       if (value === undefined) value = plainValue(criteria['_' + key]);
       if (value !== undefined) out[key] = value;
     }
+    // Filtros que a EA guarda como getter no protótipo (ex.: o de PlayStyle+).
+    let proto = Object.getPrototypeOf(criteria);
+    for (let depth = 0; proto && proto !== Object.prototype && depth < 5; depth++, proto = Object.getPrototypeOf(proto)) {
+      for (const key of Object.getOwnPropertyNames(proto)) {
+        if (key === 'constructor' || out[key] !== undefined || CONTROLLED_KEYS.includes(key)) continue;
+        const desc = Object.getOwnPropertyDescriptor(proto, key);
+        if (!desc || typeof desc.get !== 'function') continue;
+        let value;
+        try { value = plainValue(criteria[key]); } catch (e) { value = undefined; }
+        if (value !== undefined) out[key] = value;
+      }
+    }
     return out;
+  }
+
+  // Descobre qual campo da busca é o filtro "PlayStyle: PlayStyle+" do Web App,
+  // comparando uma busca capturada com os valores padrão da EA.
+  function learnPsPlusField(captured, defaults) {
+    if (!captured || !defaults) return null;
+    const known = new Set(KNOWN_CRITERIA_KEYS.concat(CONTROLLED_KEYS));
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const hits = Object.keys(captured).filter((key) => {
+      const bare = key.replace(/^_+/, '');
+      if (known.has(bare) || /^playstyle$/i.test(bare)) return false;
+      if (!/play.?style|trait|plus|^ps/i.test(bare)) return false;
+      return !same(captured[key], defaults[key]);
+    });
+    if (!hits.length) return null;
+    // Prefere o nome sem "_" (getter) ao campo interno equivalente.
+    const key = hits.find((k) => !k.startsWith('_')) || hits[0];
+    const bare = key.replace(/^_+/, '');
+    const internal = hits.find((k) => k !== key && k.replace(/^_+/, '') === bare) || null;
+    return { key, internal, value: captured[key], off: defaults[key] === undefined ? null : defaults[key] };
+  }
+
+  function applyPsPlus(criteria, on, field) {
+    const out = Object.assign({}, criteria);
+    if (!field) return out;
+    [field.key, field.internal, '_' + field.key.replace(/^_+/, ''), field.key.replace(/^_+/, '')].forEach((k) => { if (k) delete out[k]; });
+    if (on) {
+      out[field.key] = field.value;
+      if (field.internal) out[field.internal] = field.value;
+    }
+    return out;
+  }
+
+  function hasPsPlusFilter(criteria, field) {
+    return !!(field && criteria && JSON.stringify(criteria[field.key]) === JSON.stringify(field.value));
   }
 
   // A EA guarda em cache buscas idênticas, e aí cartas recém-listadas não
@@ -222,6 +269,14 @@
     return null;
   }
 
+  // "Tem PlayStyle+": se a carta informa os PlayStyles, confere; se não
+  // informa, só aceita quando o próprio filtro da EA foi usado na busca.
+  function psPlusMismatch(it, target) {
+    if (!target.psPlus) return null;
+    if (Array.isArray(it.playStyles)) return it.playStyles.some((p) => p.plus) ? null : 'sem PlayStyle+';
+    return target.psPlusServer ? null : 'não deu para confirmar PlayStyle+';
+  }
+
   // Tipo do alvo: define o que a busca procura e o que o bot aceita comprar.
   const KINDS = [['player', 'Jogador'], ['chemstyle', 'Consumível: estilo de química']];
 
@@ -282,7 +337,7 @@
     return !!(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length) ||
       PLAYER_FILTER_KEYS.some((k) => !isEmptyValue(c[k])) ||
       (Array.isArray(c.rarities) && c.rarities.length) ||
-      (target && (target.minRating > 0 || target.maxRating > 0 || (target.playStyles || []).length > 0)));
+      (target && (target.minRating > 0 || target.maxRating > 0 || target.psPlus || (target.playStyles || []).length > 0)));
   }
 
   // Motivo para não aceitar o alvo, ou null se está tudo certo.
@@ -339,6 +394,7 @@
         need(c.nation, it.nationId, 'o', 'país') ||
         (target.minRating > 0 && !(it.rating >= target.minRating) ? 'nota abaixo do mínimo' : null) ||
         (target.maxRating > 0 && !(it.rating <= target.maxRating) ? 'nota acima do máximo' : null) ||
+        psPlusMismatch(it, target) ||
         playStyleMismatch(it.playStyles, target.playStyles);
     }
     return 'alvo sem tipo definido';
@@ -368,6 +424,7 @@
     if (c.league > 0) parts.push(nameFor('league', c.league, labels, names));
     if (c.nation > 0) parts.push(nameFor('nation', c.nation, labels, names));
     if (c.level && c.level !== 'any') parts.push((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level);
+    if (t.psPlus) parts.push('Com PlayStyle+');
     (t.playStyles || []).forEach((p) => parts.push(playStyleName(p.id, p.plus)));
     if (t.minRating > 0 || t.maxRating > 0) parts.push('Nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?'));
     return parts;
@@ -1523,6 +1580,15 @@
         }
       },
 
+      criteriaDefaults() {
+        try {
+          const DTO = G('UTSearchCriteriaDTO');
+          return DTO ? serializeCriteria(new DTO()) : null;
+        } catch (e) {
+          return null;
+        }
+      },
+
       localize() {
         const svc = G('services');
         const loc = svc && svc.Localization;
@@ -1564,7 +1630,9 @@
       async search(criteria) {
         const svc = G('services').Item;
         const dto = new (G('UTSearchCriteriaDTO'))();
-        Object.assign(dto, criteria);
+        for (const key of Object.keys(criteria)) {
+          try { dto[key] = criteria[key]; } catch (e) { /* campo só de leitura */ }
+        }
         if (typeof svc.clearTransferMarketCache === 'function') svc.clearTransferMarketCache();
         let observable;
         internalCall = true;
@@ -1938,6 +2006,7 @@
           minRating: t.minRating || 0,
           maxRating: t.maxRating || 0,
           playStyles: (t.playStyles || []).map((p) => ({ id: p.id, plus: !!p.plus })),
+          psPlus: !!t.psPlus || hasPsPlusFilter(c, psField()),
           query: {},
         };
         render();
@@ -1987,14 +2056,17 @@
           html += PICKERS.slice(1).map((p) => picker(p[0], p[1], p[2])).join('');
           html += section('Nível', '<div class="chips">' + chip('data-ed-level', '', 'Qualquer', !st.level) +
             LEVELS.map((l) => chip('data-ed-level', l[0], l[1], st.level === l[0])).join('') + '</div>');
-          const ps = PLAYSTYLE_GROUPS.map(([group, ids]) => '<div class="ps-group"><div class="ps-g">' + group + '</div><div class="chips">' +
-            ids.map((id) => {
-              const sel = st.playStyles.find((p) => p.id === id);
-              return chip('data-ed-ps', id, playStyleName(id, sel && sel.plus), !!sel, sel && sel.plus ? 'plus' : '');
-            }).join('') + '</div></div>').join('');
-          const count = st.playStyles.length ? ' (' + st.playStyles.length + ')' : '';
-          html += section('PlayStyles' + count, '<details' + (st.playStyles.length ? ' open' : '') + '><summary>Escolher PlayStyles</summary>' + ps + '</details>',
-            'Toque 1× = PlayStyle, 2× = PlayStyle+, 3× = remove. O bot só compra se a carta tiver todos.');
+          const field = psField();
+          html += section('PlayStyle', '<div class="chips">' + chip('data-ed-psplus', '0', 'Qualquer', !st.psPlus) +
+            chip('data-ed-psplus', '1', 'Tem PlayStyle+', st.psPlus, st.psPlus ? 'plus' : '') + '</div>',
+            field ? 'Igual ao filtro "PlayStyle" do Web App: a própria EA traz só jogadores com PlayStyle+.'
+              : 'Para usar o filtro da própria EA, faça uma vez no Web App uma busca com <b>PlayStyle: PlayStyle+</b> ' +
+                '(o script aprende). Até lá o bot confere carta a carta e, se não conseguir confirmar, não compra.');
+          if (st.playStyles.length) {
+            html += section('PlayStyles específicos (versão anterior)', '<div class="tags">' +
+              st.playStyles.map((p) => '<span class="tag">' + escapeHtml(playStyleName(p.id, p.plus)) + '</span>').join('') +
+              '</div><button type="button" data-ed-clearps="1">Remover estes</button>');
+          }
           html += section('Nota', '<div class="grid"><div><label>Mínima</label><input data-ed-num="minRating" inputmode="numeric" value="' +
             (st.minRating || '') + '"></div><div><label>Máxima</label><input data-ed-num="maxRating" inputmode="numeric" value="' +
             (st.maxRating || '') + '"></div></div>');
@@ -2042,6 +2114,8 @@
           else if (!cur.plus) cur.plus = true;
           else st.playStyles = st.playStyles.filter((p) => p.id !== id);
         }
+        else if (d.edPsplus != null) { st.psPlus = d.edPsplus === '1'; }
+        else if (d.edClearps) { st.playStyles = []; }
         else if (d.edClear) { st[d.edClear] = 0; delete st.labels[d.edClear]; }
         else if (d.edPick) {
           st[d.edPick] = parseInt(d.id, 10);
@@ -2068,7 +2142,9 @@
           const kind = st.kind;
           const values = kind === 'chemstyle' ? { playStyle: st.consumable }
             : { position: st.position || 'any', playStyle: st.chem || 0, level: st.level || 'any', club: st.club, league: st.league, nation: st.nation };
-          const criteria = kind ? criteriaForKind(kind, st.base, values) : Object.assign({}, st.base);
+          let criteria = kind ? criteriaForKind(kind, st.base, values) : Object.assign({}, st.base);
+          const field = psField();
+          criteria = applyPsPlus(criteria, kind === 'player' && st.psPlus, field);
           const labels = {};
           if (kind === 'player') {
             if (st.player) criteria.maskedDefId = st.player;
@@ -2083,9 +2159,15 @@
             minRating: kind === 'player' ? st.minRating || 0 : 0,
             maxRating: kind === 'player' ? st.maxRating || 0 : 0,
             playStyles: kind === 'player' ? st.playStyles.map((p) => ({ id: p.id, plus: p.plus })) : [],
+            psPlus: kind === 'player' && st.psPlus,
+            psPlusServer: kind === 'player' && st.psPlus && hasPsPlusFilter(criteria, field),
           };
         },
       };
+    }
+
+    function psField() {
+      return app.state.settings.psPlusField || null;
     }
 
     const editors = new Map();
@@ -2158,6 +2240,15 @@
     }
 
     function onCaptured(criteria, card) {
+      if (!card) {
+        const learned = learnPsPlusField(criteria, adapter.criteriaDefaults && adapter.criteriaDefaults());
+        const cur = app.state.settings.psPlusField;
+        if (learned && (!cur || cur.key !== learned.key || JSON.stringify(cur.value) !== JSON.stringify(learned.value))) {
+          app.state.settings.psPlusField = learned;
+          save();
+          log('Aprendi o filtro "PlayStyle+" do Web App. Agora dá para usar nos alvos.', 'success');
+        }
+      }
       const kind = kindFromCriteria(criteria);
       if (kind !== 'player') card = null;
       app.captured = criteria;
@@ -2170,7 +2261,8 @@
         newEditor.setLabel('player', card.name);
       }
       const kindText = kind ? kindLabel(kind) : 'Tipo não reconhecido: escolha abaixo';
-      const parts = targetParts({ kind, criteria, labels: app.capturedLabels }, names);
+      const parts = targetParts({ kind, criteria, labels: app.capturedLabels,
+        psPlus: hasPsPlusFilter(criteria, app.state.settings.psPlusField) }, names);
       el('captured').innerHTML = '<b>Busca capturada:</b> ' + escapeHtml(kindText) +
         (parts.length ? ' · ' + escapeHtml(parts.join(' · ')) : '');
       el('capturedPrice').textContent = card ? 'FUTBIN: buscando preço...' : '';
@@ -2219,6 +2311,8 @@
         criteria: edited.criteria,
         labels: edited.labels,
         playStyles: edited.playStyles,
+        psPlus: edited.psPlus,
+        psPlusServer: edited.psPlusServer,
         minRating: edited.minRating,
         maxRating: edited.maxRating,
         maxBuy,
@@ -2286,6 +2380,7 @@
             ['ponte FUTBIN (segundo script)', futbin.bridgeReady()],
             ['preço nas cartas: ' + (hooks.length ? hooks.join(', ') : 'nenhuma função de desenho encontrada'), hooks.length > 0],
             ['linha: ' + (deps.overlay.rowSample() || 'nenhuma lista vista ainda').slice(0, 400), true],
+            ['filtro PlayStyle+ do Web App: ' + (app.state.settings.psPlusField ? 'aprendido (' + app.state.settings.psPlusField.key + ')' : 'ainda não aprendido'), !!app.state.settings.psPlusField],
             ['campos de preço da EA: ' + (deps.overlay.eaSample() || 'nenhuma carta vista ainda'), /market/i.test(deps.overlay.eaSample())],
             (() => {
               const c = deps.overlay.counters();
@@ -2523,6 +2618,7 @@
     describeItem, itemKindOf, migrateTarget, loadChemStyles, chemStyleName,
     PLAYSTYLES, playStyleName, readPlayStyles, playStyleMismatch, targetParts, createNameService,
     searchByName, parsePlayersDb, searchPlayers, validName,
+    learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

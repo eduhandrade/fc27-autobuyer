@@ -106,3 +106,47 @@ test('ID da carta como texto ainda entra no registro e na venda', async () => {
   ab.syncLedger(ledger, r.items);
   assert.equal(ledger.i412345678901.cost, 2000);
 });
+
+function entity(id, extra) {
+  return Object.assign({ id, definitionId: 50, rating: 85, type: 'player', _staticData: { name: 'Le Tissier' }, _auction: { tradeState: null } }, extra);
+}
+const respond = (r) => ({ observe(scope, cb) { cb({}, r); } });
+
+test('acha as cartas em qualquer formato de resposta', () => {
+  const list = [entity(1), entity(2)];
+  assert.equal(ab.findItemArray({ success: true, data: list }).length, 2);
+  assert.equal(ab.findItemArray({ success: true, response: { items: list } }).length, 2);
+  assert.equal(ab.findItemArray({ data: { itemList: new Map([[1, list[0]], [2, list[1]]]) } }).length, 2);
+  assert.equal(ab.findItemArray({ data: { auctionInfo: [{ itemData: { id: 9 } }] } }).length, 1);
+  assert.equal(ab.findItemArray({ success: true, data: {} }), null);
+  assert.equal(ab.findItemArray({ data: { tags: ['a', 'b'], counts: [1, 2] } }), null);
+  assert.match(ab.shapeOf({ success: true, data: { total: 75 } }), /data:\{total:number\}/);
+});
+
+test('função responde ok sem cartas: usa o depósito interno do Web App', async () => {
+  const items = [entity(1), entity(2), entity(3, { _auction: { tradeState: 'active' } })];
+  const win = {
+    UTSearchCriteriaDTO: function () {},
+    repositories: { Item: { getTransferItems() { return items; }, getUnassignedItems() { return []; } } },
+    services: { Item: { requestTransferItems() { return respond({ success: true, status: 200, data: {} }); } } },
+  };
+  const ad = ab.createEaAdapter(win);
+  const r = await ad.pile('transfer');
+  assert.equal(r.success, true);
+  assert.equal(r.items.length, 0);
+  assert.match(r.shape, /data/);
+  const repo = ad.repositoryPile('transfer');
+  assert.equal(repo.length, 3);
+  assert.deepEqual(ab.sellableStats(repo), { total: 3, ready: 2, listed: 1, sold: 0, untradeable: 0 });
+  assert.equal(ad.repositoryPile('watch'), null);
+});
+
+test('cartas vistas na tela são filtradas pela pilha', () => {
+  const ad = ab.createEaAdapter({ ItemPile: { TRANSFER: 5, PURCHASED: 7 } });
+  assert.equal(ad.pileId('transfer'), 5);
+  const club = ad.toItem(entity(1, { pile: 7 }));
+  const tl = ad.toItem(entity(2, { pile: 5 }));
+  assert.equal(club.pile, 7);
+  assert.equal(tl.pile, 5);
+  assert.equal(ab.createEaAdapter({}).pileId('transfer'), 5);
+});

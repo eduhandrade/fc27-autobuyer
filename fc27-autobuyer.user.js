@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.1.0
+// @version      1.1.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.1.0';
+  const SCRIPT_VERSION = '1.1.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1063,6 +1063,17 @@
   }
 
   function createPriceOverlay(win, prices, getSettings, onError, registry) {
+    // Título da tela atual do Web App (ex.: "Transfer List"), para saber em
+    // qual lista cada carta apareceu.
+    function screenTitle() {
+      try {
+        const h = win.document.querySelector('.ut-navigation-bar-view h1, .ut-navigation-bar-view .title, header h1, h1');
+        return h ? h.textContent.trim() : '';
+      } catch (e) {
+        return '';
+      }
+    }
+
     onError = onError || function () {};
     const installed = [];
 
@@ -1146,7 +1157,10 @@
 
     function show(view, args, kind) {
       const item = itemFromView(view, args);
-      if (registry && item && item.id > 0) registry.set(item.id, item);
+      if (registry && item && item.id > 0) {
+        registry.set(item.id, item);
+        if (registry.screens) registry.screens.set(item.id, screenTitle());
+      }
       const settings = getSettings();
       if (!settings.showCardPrices) return;
       counters.calls++;
@@ -1810,6 +1824,59 @@
     return names.find((n) => spec.re.test(n) && !spec.not.test(n) && /^(request|get|load|fetch|refresh)/i.test(n)) || null;
   }
 
+  // Parece uma carta? (objeto da EA ou JSON cru com itemData)
+  function looksLikeItem(x) {
+    if (!x || typeof x !== 'object') return false;
+    if (x.itemData && typeof x.itemData === 'object') return true;
+    const has = (k) => { try { return x[k] != null || x['_' + k] != null; } catch (e) { return false; } };
+    return has('id') && (has('definitionId') || has('resourceId') || has('rating') || has('_auction'));
+  }
+
+  function toArray(v) {
+    if (Array.isArray(v)) return v;
+    try {
+      if (v && typeof v.values === 'function' && !(typeof v === 'string')) {
+        const arr = Array.from(v.values());
+        if (arr.length && arr.every((x) => x && typeof x === 'object')) return arr;
+      }
+    } catch (e) { /* ignora */ }
+    return null;
+  }
+
+  // Procura, em qualquer lugar da resposta, uma lista de cartas.
+  function findItemArray(obj, depth, seen) {
+    depth = depth || 0;
+    seen = seen || new Set();
+    if (!obj || typeof obj !== 'object' || depth > 5 || seen.has(obj)) return null;
+    seen.add(obj);
+    const arr = toArray(obj);
+    if (arr) {
+      if (arr.length && arr.filter(looksLikeItem).length >= Math.ceil(arr.length * 0.8)) return arr.filter(looksLikeItem);
+      if (Array.isArray(obj)) return null;
+    }
+    let keys = [];
+    try { keys = Object.keys(obj); } catch (e) { keys = []; }
+    for (const k of keys) {
+      let v;
+      try { v = obj[k]; } catch (e) { continue; }
+      const r = findItemArray(v, depth + 1, seen);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  // Resumo da forma da resposta (para o Log, quando nada é encontrado).
+  function shapeOf(obj, depth) {
+    depth = depth || 0;
+    if (obj == null) return String(obj);
+    if (Array.isArray(obj)) return '[' + obj.length + (obj.length ? ' × ' + shapeOf(obj[0], depth + 1) : '') + ']';
+    if (typeof obj !== 'object') return typeof obj;
+    if (depth > 2) return '{…}';
+    let keys = [];
+    try { keys = Object.keys(obj).slice(0, 8); } catch (e) { keys = []; }
+    return '{' + keys.map((k) => { let v; try { v = obj[k]; } catch (e) { v = '?'; } return k + ':' + shapeOf(v, depth + 1); }).join(', ') + '}';
+  }
+
   function pileFromUrl(url) {
     const u = String(url || '');
     if (/\/tradepile(\?|$|\/)/i.test(u)) return 'transfer';
@@ -2045,6 +2112,7 @@
     UTPlayerItemView: () => (typeof UTPlayerItemView !== 'undefined' ? UTPlayerItemView : undefined),
     UTItemView: () => (typeof UTItemView !== 'undefined' ? UTItemView : undefined),
     ItemPile: () => (typeof ItemPile !== 'undefined' ? ItemPile : undefined),
+    repositories: () => (typeof repositories !== 'undefined' ? repositories : undefined),
   };
 
   function lookupGlobal(win, name) {
@@ -2140,6 +2208,10 @@
       return 'carta ' + (raw.definitionId || '?');
     }
 
+    function convert(lookup) {
+      return (x) => (x && x.itemData ? itemFromJson(x, lookup) : toItem(x));
+    }
+
     function toItem(raw) {
       const a = auctionOf(raw);
       return {
@@ -2169,6 +2241,7 @@
         marketAverage: eaMarketAverage(raw),
         minPrice: priceLimit(raw, 'min'),
         maxPrice: priceLimit(raw, 'max'),
+        pile: numberOf(raw, 'pile'),
       };
     }
 
@@ -2322,12 +2395,42 @@
         try { observable = svc[fn](); } catch (e) { return { success: false, status: 'erro ' + e.message, items: [] }; }
         if (!observable || typeof observable.observe !== 'function') return { success: false, status: 'resposta inesperada', items: [], method: fn };
         const response = await observe(observable, 15000);
-        const d = response.data || {};
-        const list = d.items || d.auctionInfo || d.itemData || response.items || [];
-        const items = list.map((x) => (x && x.itemData ? itemFromJson(x, lookup) : toItem(x))).filter(Boolean);
+        const list = findItemArray(response) || [];
+        const items = list.map(convert(lookup)).filter(Boolean);
         const ok = !!response.success || (!response.timeout && list.length > 0);
-        return Object.assign(result(response), { success: ok, items, method: fn, timeout: !!response.timeout });
+        return Object.assign(result(response), { success: ok, items, method: fn, timeout: !!response.timeout,
+          shape: items.length ? '' : shapeOf(response) });
       },
+
+      // Cartas que o Web App guarda no "depósito" interno (repositories.Item).
+      repositoryPile(which, lookup) {
+        const repo = G('repositories') && G('repositories').Item;
+        if (!repo) return null;
+        const re = { transfer: /transfer|trade/i, unassigned: /unassigned|purchased/i, watch: /watch/i }[which];
+        const candidates = [];
+        for (const name of methodNames(repo)) {
+          if (re.test(name) && /^get/i.test(name) && !/count|size|limit|max/i.test(name)) candidates.push(() => repo[name]());
+        }
+        let keys = [];
+        try { keys = Object.keys(repo); } catch (e) { keys = []; }
+        keys.filter((k) => re.test(k)).forEach((k) => candidates.push(() => repo[k]));
+        for (const get of candidates) {
+          let v;
+          try { v = get(); } catch (e) { continue; }
+          const list = findItemArray(v);
+          if (list && list.length) return list.map(convert(lookup)).filter(Boolean);
+        }
+        return null;
+      },
+
+      // Número da pilha "lista de transferências" (para filtrar cartas da tela).
+      pileId(which) {
+        const Pile = G('ItemPile');
+        const key = { transfer: 'TRANSFER', unassigned: 'PURCHASED', watch: 'INBOX' }[which];
+        return Pile && Pile[key] != null ? Pile[key] : { transfer: 5, unassigned: 7 }[which];
+      },
+
+      toItem,
 
       // Nomes das funções do Web App ligadas às pilhas (para o Diagnóstico).
       pileMethods() {
@@ -3103,12 +3206,37 @@
     // que o Web App desenhou (necessário para anunciar).
     let lastPileMethod = '';
 
+    // Fontes, na ordem: função do Web App, depósito interno, dados que o Web
+    // App recebeu ao abrir a tela, e cartas que já apareceram na tela.
     async function readPile(which) {
       const r = await adapter.pile(which, deps.lookup);
-      lastPileMethod = r.success ? r.method || '' : 'dados carregados pelo Web App';
       const cap = deps.piles && deps.piles[which];
-      let items = r.success ? r.items : cap ? cap.items : null;
-      let source = r.success ? 'web app' : cap ? 'captura' : null;
+      let items = null;
+      let source = null;
+      if (r.success && r.items.length) { items = r.items; source = 'função ' + r.method; }
+      if (!items) {
+        const repo = adapter.repositoryPile(which, deps.lookup);
+        if (repo && repo.length) { items = repo; source = 'depósito do Web App'; }
+      }
+      if (!items && cap && cap.items.length) { items = cap.items; source = 'captura'; }
+      if (!items && deps.entities && deps.entities.size) {
+        const pileId = adapter.pileId(which);
+        const seen = Array.from(deps.entities.values()).map(adapter.toItem).filter((it) => it.id > 0 && it.pile === pileId);
+        if (seen.length) { items = seen; source = 'cartas vistas na tela'; }
+      }
+      if (!items && deps.entities && deps.entities.screens) {
+        const re = { transfer: /transfer list|lista de transfer/i, unassigned: /unassigned|não atribu|nao atribu/i, watch: /transfer targets|observa|alvos/i }[which];
+        const seen = Array.from(deps.entities.entries())
+          .filter(([id]) => re.test(deps.entities.screens.get(id) || ''))
+          .map(([, e]) => adapter.toItem(e)).filter((it) => it.id > 0);
+        if (seen.length) { items = seen; source = 'cartas vistas na tela "' + deps.entities.screens.get(seen[0].id) + '"'; }
+      }
+      if (!items && r.success) {
+        log('Diagnóstico da lista: a função ' + r.method + ' respondeu sem cartas reconhecíveis. Forma da resposta: ' + (r.shape || '?'), 'warn');
+        items = [];
+        source = 'função ' + r.method;
+      }
+      lastPileMethod = source || '';
       if (!items) {
         const why = r.missing ? 'função não encontrada' : r.timeout ? 'o Web App não respondeu' : 'erro ' + r.status;
         return { ok: false, why };
@@ -3742,6 +3870,7 @@
     // Cartas que o Web App já desenhou na tela (para poder anunciá-las) e as
     // pilhas que ele já carregou (lista de transferências etc.).
     const entities = new Map();
+    entities.screens = new Map();
     const piles = {};
     let ui = null;
     let lookup = null;
@@ -3825,7 +3954,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    findPileMethod, pileFromUrl, itemFromJson, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

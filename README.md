@@ -41,6 +41,12 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
 
 Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 
+## Lucro, lances e venda (abas 💰 Lucro, 🔨 Lances e 🏷️ Vender)
+- **Lucro:** cada compra do bot entra no registro com o preço pago. Compras antigas entram pelo "Item bought for" quando a carta está na lista de transferências ou em Não atribuídos (botão *Atualizar*, ou automaticamente sempre que você abre a lista de transferências no Web App). Quando a carta aparece como vendida, o lucro é calculado: venda − 5% da EA − preço pago. Cartas vendidas e já removidas com "Limpar vendidos" antes do registro não dá para recuperar.
+- **Lances em massa:** escolha um alvo (ou a última busca do mercado), o lance máximo por carta, quantos lances e em quanto tempo os leilões devem terminar. O bot busca os leilões que terminam primeiro, dá o menor lance aceito e confere tipo/filtros da carta antes. *Conferir lances* move as cartas ganhas para a lista de transferências e registra o custo.
+- **Venda em massa:** carrega as cartas não anunciadas/expiradas (e, se quiser, Não atribuídos), agrupa as iguais ("Você tem 3"), sugere o preço (média da EA, ou FUTBIN se disponível), respeita a faixa de preço da EA e mostra quanto você recebe e o lucro por carta. Você escolhe quantas e por quanto; o bot anuncia uma a uma.
+- O modo simulação vale para os três módulos.
+
 ## Preço nas cartas
 - Por padrão, cada carta mostra a **média de mercado da EA** (o campo `marketAverage` que o próprio Web App recebe; é o "Market average" da EA). Não depende de site externo nem faz requisições. Quando a EA não informa a média de uma carta, a etiqueta mostra "Média EA —".
 - Em **Config → Preço mostrado nas cartas** dá para escolher **FUTBIN**. O FUTBIN protege o site contra acesso automatizado e costuma recusar as consultas (erro 403); o script não tenta contornar essa proteção. Quando o FUTBIN bloqueia, as consultas ficam pausadas por 30 minutos e as cartas voltam a mostrar a média da EA.

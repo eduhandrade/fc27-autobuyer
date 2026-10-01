@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.9.0
+// @version      1.0.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.9.0';
+  const SCRIPT_VERSION = '1.0.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1284,6 +1284,196 @@
     return { name: it.name, definitionId: it.definitionId, rating: it.rating };
   }
 
+  // ---------------------------------------------------------------------------
+  // Registro de compras e lucro
+  // ---------------------------------------------------------------------------
+
+  // Cada carta comprada vira uma entrada, indexada pelo ID do item na conta.
+  // Custo vem do bot (preço pago) ou do "Item bought for" do Web App
+  // (lastSalePrice). Venda vem da lista de transferências (anúncio fechado).
+  function ledgerKey(itemId) {
+    return 'i' + itemId;
+  }
+
+  function recordBuy(ledger, e) {
+    if (!e || !(e.itemId > 0)) return null;
+    const key = ledgerKey(e.itemId);
+    const cur = ledger[key] || {};
+    ledger[key] = Object.assign({}, cur, {
+      itemId: e.itemId,
+      name: e.name || cur.name || 'carta',
+      rating: e.rating || cur.rating || 0,
+      definitionId: e.definitionId || cur.definitionId || 0,
+      cost: e.price > 0 ? e.price : cur.cost || 0,
+      source: e.source || cur.source || 'bot',
+      boughtAt: e.at || cur.boughtAt || Date.now(),
+      status: cur.status || 'comprada',
+    });
+    return ledger[key];
+  }
+
+  const SALE_STATES = { closed: 'vendida', active: 'à venda', expired: 'expirada' };
+
+  // Atualiza o registro com os itens da lista de transferências (ou de outra
+  // pilha). Itens desconhecidos entram com o custo do "Item bought for".
+  function syncLedger(ledger, items, now) {
+    now = now || Date.now();
+    const changes = { added: 0, sold: [] };
+    for (const it of items || []) {
+      if (!(it.id > 0)) continue;
+      const key = ledgerKey(it.id);
+      let e = ledger[key];
+      if (!e) {
+        e = ledger[key] = {
+          itemId: it.id,
+          name: it.name,
+          rating: it.rating || 0,
+          definitionId: it.definitionId || 0,
+          cost: it.lastSalePrice > 0 ? it.lastSalePrice : 0,
+          source: 'web app',
+          boughtAt: now,
+          status: 'comprada',
+        };
+        changes.added++;
+      } else if (!(e.cost > 0) && it.lastSalePrice > 0) {
+        e.cost = it.lastSalePrice;
+      }
+      const state = SALE_STATES[it.tradeState] || (it.tradeState ? it.tradeState : 'na lista');
+      if (e.status === 'vendida') continue;
+      e.status = state;
+      if (it.tradeState === 'active' || it.tradeState === 'expired') e.listedFor = it.buyNow || e.listedFor || 0;
+      if (it.tradeState === 'closed') {
+        e.soldFor = it.currentBid > 0 ? it.currentBid : it.buyNow;
+        e.soldAt = now;
+        changes.sold.push(e);
+      }
+    }
+    return changes;
+  }
+
+  function entryProfit(e) {
+    if (!(e.soldFor > 0) || !(e.cost > 0)) return null;
+    return netAfterTax(e.soldFor) - e.cost;
+  }
+
+  function ledgerSummary(ledger) {
+    const out = { soldCount: 0, revenue: 0, soldCost: 0, profit: 0, openCount: 0, openCost: 0, unknownCost: 0 };
+    for (const e of Object.values(ledger || {})) {
+      if (e.status === 'vendida') {
+        const p = entryProfit(e);
+        if (p == null) { out.unknownCost++; continue; }
+        out.soldCount++;
+        out.revenue += netAfterTax(e.soldFor);
+        out.soldCost += e.cost;
+        out.profit += p;
+      } else if (e.status !== 'removida') {
+        out.openCount++;
+        out.openCost += e.cost > 0 ? e.cost : 0;
+        if (!(e.cost > 0)) out.unknownCost++;
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lances em massa
+  // ---------------------------------------------------------------------------
+
+  // Próximo lance aceito pela EA: o lance inicial, se ninguém deu lance, ou
+  // um degrau acima do lance atual.
+  function nextBidAmount(it) {
+    if (it.currentBid > 0) return nextPrice(it.currentBid);
+    return Math.max(MIN_PRICE, roundDown(it.startingBid || MIN_PRICE));
+  }
+
+  // Motivo para NÃO dar lance nesta carta, ou null.
+  function bidProblem(it, plan, ctx) {
+    ctx = ctx || {};
+    if (it.tradeOwner) return 'anúncio seu';
+    if (it.bidState === 'highest') return 'você já é o maior lance';
+    if (!(it.expires > 0)) return 'leilão encerrado';
+    if (plan.maxExpires > 0 && it.expires > plan.maxExpires) return 'termina tarde demais';
+    const amount = nextBidAmount(it);
+    if (amount > plan.maxBid) return 'lance necessário ' + fmt(amount) + ' passa do máximo';
+    if (it.buyNow > 0 && amount >= it.buyNow) return 'lance chegaria no preço de compra imediata';
+    if (ctx.coins != null && amount > ctx.coins) return 'moedas insuficientes';
+    const reason = plan.target ? mismatchReason(it, plan.target) : null;
+    if (reason) return reason;
+    return null;
+  }
+
+  // Escolhe em quais cartas dar lance: as que terminam primeiro, até o limite
+  // de lances e de moedas (cada lance prende as moedas até ser superado).
+  function planBids(items, plan, ctx) {
+    ctx = ctx || {};
+    let coins = ctx.coins == null ? Infinity : ctx.coins;
+    let left = plan.maxBids > 0 ? plan.maxBids : Infinity;
+    const out = [];
+    const sorted = items.slice().sort((a, b) => (a.expires || 0) - (b.expires || 0));
+    for (const it of sorted) {
+      if (left <= 0) break;
+      if (ctx.seen && ctx.seen.has(it.tradeId)) continue;
+      const why = bidProblem(it, plan, { coins });
+      if (why) { if (ctx.onSkip) ctx.onSkip(it, why); continue; }
+      const amount = nextBidAmount(it);
+      out.push({ item: it, amount });
+      coins -= amount;
+      left--;
+    }
+    return out;
+  }
+
+  // Situação de um lance na lista de observação.
+  function watchStatus(it) {
+    if (it.tradeState === 'closed') return it.bidState === 'highest' ? 'ganhou' : 'perdeu';
+    if (it.tradeState === 'expired') return 'perdeu';
+    return it.bidState === 'highest' ? 'ganhando' : it.bidState === 'outbid' ? 'superado' : 'acompanhando';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Venda em massa
+  // ---------------------------------------------------------------------------
+
+  // Agrupa cartas iguais que podem ser anunciadas (não anunciadas ou expiradas).
+  function groupSellable(items, ledger) {
+    const groups = new Map();
+    for (const it of items || []) {
+      if (it.untradeable) continue;
+      if (it.tradeState === 'active' || it.tradeState === 'closed') continue;
+      const key = (it.definitionId || it.name) + ':' + (it.rating || 0);
+      if (!groups.has(key)) {
+        groups.set(key, { key, name: it.name, rating: it.rating || 0, definitionId: it.definitionId,
+          kind: it.kind, items: [], costs: [], marketAverage: null, minPrice: 0, maxPrice: 0 });
+      }
+      const g = groups.get(key);
+      g.items.push(it);
+      const e = ledger && ledger[ledgerKey(it.id)];
+      const cost = e && e.cost > 0 ? e.cost : it.lastSalePrice > 0 ? it.lastSalePrice : 0;
+      if (cost) g.costs.push(cost);
+      if (it.marketAverage > 0) g.marketAverage = it.marketAverage;
+      if (it.minPrice > 0) g.minPrice = it.minPrice;
+      if (it.maxPrice > 0) g.maxPrice = it.maxPrice;
+    }
+    return Array.from(groups.values()).map((g) => Object.assign(g, {
+      count: g.items.length,
+      avgCost: g.costs.length ? Math.round(g.costs.reduce((a, b) => a + b, 0) / g.costs.length) : 0,
+    })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+
+  // Confere e ajusta o preço de venda: degraus da EA, faixa permitida pela EA
+  // e lance inicial abaixo do "compre já".
+  function sellPrices(group, bin, start) {
+    let b = roundDown(bin);
+    const notes = [];
+    if (group.maxPrice > 0 && b > group.maxPrice) { b = roundDown(group.maxPrice); notes.push('limitado ao máximo da EA'); }
+    if (group.minPrice > 0 && b < group.minPrice) return { error: 'abaixo do mínimo permitido pela EA (' + fmt(group.minPrice) + ')' };
+    if (b < 200) return { error: 'preço mínimo de compra imediata é 200' };
+    let st = start > 0 ? roundDown(start) : prevPrice(b);
+    if (st >= b) st = prevPrice(b);
+    const perCard = netAfterTax(b) - (group.avgCost || 0);
+    return { bin: b, start: st, notes, profitPerCard: group.avgCost ? perCard : null };
+  }
+
   function emptyStats() {
     return { searches: 0, buys: 0, spent: 0, listed: 0, missed: 0, errors: 0, profit: 0, skipped: 0, simulated: 0 };
   }
@@ -1458,6 +1648,9 @@
       this.stats.spent += item.buyNow;
       const purchase = {
         at: Date.now(),
+        itemId: item.id,
+        rating: item.rating,
+        definitionId: item.definitionId,
         name: item.name,
         price: item.buyNow,
         target: target.name,
@@ -1510,6 +1703,140 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Módulos de lances e de venda
+  // ---------------------------------------------------------------------------
+
+  function sleepMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  }
+
+  // Lances em massa: busca (as que terminam primeiro vêm antes), dá lances nas
+  // que cabem no plano e repete até atingir o número de lances ou o limite de
+  // buscas. Para sozinho em captcha, sessão expirada ou bloqueio.
+  async function runBulkBids(o) {
+    const { adapter, plan, settings: s, log } = o;
+    const random = o.random || Math.random;
+    const wait = o.wait || sleepMs;
+    const stopped = o.isStopped || (() => false);
+    const seen = new Set();
+    const res = { searches: 0, bids: 0, simulated: 0, missed: 0, coinsCommitted: 0, stopReason: '' };
+    const maxRounds = plan.maxSearches > 0 ? plan.maxSearches : 30;
+    const criteria = Object.assign({}, plan.target.criteria);
+    delete criteria.minBuy;
+    delete criteria.maxBuy;
+    let busterIndex = 0;
+    while (!stopped()) {
+      if (plan.maxBids > 0 && res.bids + res.simulated >= plan.maxBids) { res.stopReason = 'número de lances atingido'; break; }
+      if (res.searches >= maxRounds) { res.stopReason = 'limite de buscas atingido'; break; }
+      const search = await adapter.search(Object.assign({}, criteria, {
+        maxBid: roundDown(plan.maxBid),
+        minBuy: cacheBusterValues(plan.maxBid)[busterIndex++ % cacheBusterValues(plan.maxBid).length],
+      }));
+      res.searches++;
+      if (!search.success) {
+        const kind = classifyStatus(search.status);
+        res.stopReason = FATAL_MESSAGES[kind] ? STOP_REASONS[kind] : 'erro ' + search.status + ' na busca';
+        log(FATAL_MESSAGES[kind] || ('Erro ' + search.status + ' na busca de lances.'), 'error');
+        break;
+      }
+      const left = plan.maxBids > 0 ? plan.maxBids - res.bids - res.simulated : 0;
+      const picks = planBids(search.items, Object.assign({}, plan, { maxBids: left }), {
+        coins: adapter.getCoins(),
+        seen,
+      });
+      for (const pick of picks) {
+        if (stopped()) break;
+        seen.add(pick.item.tradeId);
+        const what = describeItem(pick.item) + ' (termina em ' + Math.max(1, Math.round(pick.item.expires / 60)) + ' min)';
+        if (s.dryRun) {
+          res.simulated++;
+          log('SIMULAÇÃO: daria lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
+          continue;
+        }
+        const bid = await adapter.buy(pick.item.raw, pick.amount);
+        if (bid.success) {
+          res.bids++;
+          res.coinsCommitted += pick.amount;
+          log('Lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
+        } else {
+          const kind = classifyStatus(bid.status);
+          if (FATAL_MESSAGES[kind]) {
+            res.stopReason = STOP_REASONS[kind];
+            log(FATAL_MESSAGES[kind], 'error');
+            return res;
+          }
+          res.missed++;
+          log('Lance não aceito em ' + describeItem(pick.item) + ' (alguém deu lance antes ou o leilão acabou).', 'warn');
+        }
+        await wait(randomBetween(800, 1600, random));
+      }
+      await wait(randomBetween(s.delayMin * 1000, s.delayMax * 1000, random));
+    }
+    if (!res.stopReason) res.stopReason = 'parado por você';
+    return res;
+  }
+
+  // Confere a lista de observação: cartas ganhas vão para a lista de
+  // transferências e entram no registro com o valor do lance.
+  async function collectWonBids(o) {
+    const { adapter, ledger, log, settings: s } = o;
+    const pile = await adapter.pile('watch');
+    if (!pile.success) return { error: pile.missing ? 'o Web App não ofereceu a lista de observação' : 'erro ' + pile.status };
+    const counts = { ganhou: 0, ganhando: 0, superado: 0, perdeu: 0, acompanhando: 0, moved: 0 };
+    for (const it of pile.items) {
+      const st = watchStatus(it);
+      counts[st]++;
+      if (st !== 'ganhou') continue;
+      recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId, price: it.currentBid, source: 'lance' });
+      if (s.dryRun) continue;
+      const moved = await adapter.moveToTransferList(it.raw);
+      if (moved.success) counts.moved++;
+      else log('Não consegui mover ' + it.name + ' para a lista de transferências (erro ' + moved.status + ').', 'warn');
+      await sleepMs(400);
+    }
+    return counts;
+  }
+
+  // Venda em massa: anuncia a quantidade escolhida de cada grupo.
+  async function runBulkSell(o) {
+    const { adapter, orders, ledger, settings: s, log } = o;
+    const random = o.random || Math.random;
+    const wait = o.wait || sleepMs;
+    const stopped = o.isStopped || (() => false);
+    const res = { listed: 0, simulated: 0, failed: 0, stopReason: '' };
+    for (const order of orders) {
+      const items = order.group.items.slice(0, order.qty);
+      for (const it of items) {
+        if (stopped()) { res.stopReason = 'parado por você'; return res; }
+        if (s.dryRun) {
+          res.simulated++;
+          log('SIMULAÇÃO: anunciaria ' + describeItem(it) + ' por ' + fmt(order.bin) + ' (lance inicial ' + fmt(order.start) + ').', 'success');
+          continue;
+        }
+        const r = await adapter.list(it.raw, order.start, order.bin, order.duration);
+        if (r.success) {
+          res.listed++;
+          const e = ledger && ledger[ledgerKey(it.id)];
+          if (e) { e.status = 'à venda'; e.listedFor = order.bin; }
+          log('Anunciei ' + describeItem(it) + ' por ' + fmt(order.bin) + '.', 'success');
+        } else {
+          const kind = classifyStatus(r.status);
+          if (FATAL_MESSAGES[kind]) {
+            res.stopReason = STOP_REASONS[kind];
+            log(FATAL_MESSAGES[kind], 'error');
+            return res;
+          }
+          res.failed++;
+          log('Não consegui anunciar ' + describeItem(it) + ' (erro ' + r.status + ').', 'warn');
+        }
+        await wait(randomBetween(1000, 2000, random));
+      }
+    }
+    res.stopReason = 'concluído';
+    return res;
+  }
+
+  // ---------------------------------------------------------------------------
   // Integração com o Web App da EA
   // ---------------------------------------------------------------------------
 
@@ -1522,6 +1849,7 @@
     UTItemTableCellView: () => (typeof UTItemTableCellView !== 'undefined' ? UTItemTableCellView : undefined),
     UTPlayerItemView: () => (typeof UTPlayerItemView !== 'undefined' ? UTPlayerItemView : undefined),
     UTItemView: () => (typeof UTItemView !== 'undefined' ? UTItemView : undefined),
+    ItemPile: () => (typeof ItemPile !== 'undefined' ? ItemPile : undefined),
   };
 
   function lookupGlobal(win, name) {
@@ -1594,7 +1922,27 @@
         position: any(raw, 'preferredPosition'),
         positions: list(raw, 'possiblePositions'),
         playStyles: readPlayStyles(raw),
+        id: field(raw, 'id'),
+        lastSalePrice: field(raw, 'lastSalePrice') || 0,
+        tradeState: a.tradeState || null,
+        currentBid: a.currentBid || 0,
+        startingBid: a.startingBid || 0,
+        bidState: a.bidState || null,
+        tradeOwner: !!a.tradeOwner,
+        untradeable: !!(raw.untradeable != null ? raw.untradeable : raw._untradeable),
+        marketAverage: eaMarketAverage(raw),
+        minPrice: priceLimit(raw, 'min'),
+        maxPrice: priceLimit(raw, 'max'),
       };
+    }
+
+    // Faixa de preço permitida pela EA para anunciar a carta.
+    function priceLimit(raw, which) {
+      const direct = field(raw, which === 'min' ? 'marketDataMinPrice' : 'marketDataMaxPrice');
+      if (direct > 0) return direct;
+      const lim = raw._itemPriceLimits || raw.itemPriceLimits;
+      const v = lim && (which === 'min' ? lim.minimum : lim.maximum);
+      return typeof v === 'number' && v > 0 ? v : 0;
     }
 
     function field(raw, name) {
@@ -1715,8 +2063,46 @@
         return result(await observe(G('services').Item.bid(raw, price)));
       },
 
-      async list(raw, startBid, buyNow) {
-        return result(await observe(G('services').Item.list(raw, startBid, buyNow, 3600)));
+      async list(raw, startBid, buyNow, duration) {
+        return result(await observe(G('services').Item.list(raw, startBid, buyNow, duration || 3600)));
+      },
+
+      // Pilhas da conta: lista de transferências, não atribuídos e lances.
+      async pile(which) {
+        const svc = G('services').Item;
+        const fn = { transfer: 'requestTransferItems', unassigned: 'requestUnassignedItems', watch: 'requestWatchedItems' }[which];
+        if (!fn || typeof svc[fn] !== 'function') return { success: false, status: 0, items: [], missing: true };
+        const response = await observe(svc[fn]());
+        const items = (response.data && response.data.items) || [];
+        return Object.assign(result(response), { items: items.map(toItem) });
+      },
+
+      async moveToTransferList(raw) {
+        const Pile = G('ItemPile');
+        const svc = G('services').Item;
+        if (!Pile || typeof svc.move !== 'function') return { success: false, status: 0 };
+        return result(await observe(svc.move(raw, Pile.TRANSFER)));
+      },
+
+      // Sempre que o Web App carregar a lista de transferências, o registro de
+      // lucro é atualizado (inclusive antes de "Limpar vendidos").
+      hookTransferList(callback) {
+        const svc = G('services') && G('services').Item;
+        if (!svc || typeof svc.requestTransferItems !== 'function' || svc.requestTransferItems.__fcabHooked) return false;
+        const original = svc.requestTransferItems;
+        const wrapped = function () {
+          const observable = original.apply(this, arguments);
+          if (observable && typeof observable.observe === 'function') {
+            observe(observable).then((response) => {
+              const items = ((response.data && response.data.items) || []).map(toItem);
+              try { callback(items); } catch (e) { /* ignora */ }
+            }).catch(() => {});
+          }
+          return observable;
+        };
+        wrapped.__fcabHooked = true;
+        svc.requestTransferItems = wrapped;
+        return true;
       },
     };
   }
@@ -1763,6 +2149,7 @@
           settings: Object.assign({}, DEFAULT_SETTINGS, saved.settings),
           targets: (Array.isArray(saved.targets) ? saved.targets : []).map(migrateTarget),
           history: Array.isArray(saved.history) ? saved.history : [],
+          ledger: saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {},
         };
       },
       save(state) {
@@ -1803,8 +2190,22 @@
 #fcab-panel .fberr[hidden]{display:none}
 #fcab-panel .stats{padding:8px 10px;font-size:12px;color:#aaa;display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
 #fcab-panel .stats b{color:#fff;display:block;font-size:14px}
-#fcab-panel .tabs{display:flex;gap:4px;padding:0 10px 8px}
-#fcab-panel .tabs button{flex:1;padding:6px}
+#fcab-panel .tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:0 10px 8px}
+#fcab-panel .tabs button{padding:7px 4px;font-size:13px}
+#fcab-panel .kpis{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:8px 0}
+#fcab-panel .kpi{background:#12151a;border-radius:10px;padding:8px}
+#fcab-panel .kpi span{display:block;font-size:11px;color:#9aa3b2}
+#fcab-panel .kpi b{font-size:17px}
+#fcab-panel .pos{color:#4cd97b}
+#fcab-panel .neg{color:#ff6b6b}
+#fcab-panel .rows{font-size:12px}
+#fcab-panel .rows .r{display:flex;gap:6px;justify-content:space-between;border-bottom:1px solid #22262d;padding:5px 0}
+#fcab-panel .rows .r div:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fcab-panel .sg-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
+#fcab-panel .sg-count{font-size:13px;background:#12344d;color:#6fc3ff;border-radius:999px;padding:2px 8px;white-space:nowrap}
+#fcab-panel .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+#fcab-panel .result{background:#12151a;border-radius:8px;padding:8px;font-size:12px;margin-top:8px}
+#fcab-panel .result[hidden]{display:none}
 #fcab-panel .tabs button.on{background:#3b3f47}
 #fcab-panel section{padding:0 10px 12px}
 #fcab-panel section[hidden]{display:none}
@@ -1925,13 +2326,15 @@
         <button data-act="close">✕</button>
       </div>
       <div class="stats" data-el="stats"></div>
-      <div class="dry" data-el="dry" hidden>🧪 MODO SIMULAÇÃO: o bot não compra nada, só mostra no Log o que compraria. Confira e desligue em Config.</div>
+      <div class="dry" data-el="dry" hidden>🧪 MODO SIMULAÇÃO: nada é comprado, anunciado nem recebe lance; o Log mostra o que seria feito. Confira e desligue em Config.</div>
       <div class="fberr" data-el="fberr" hidden></div>
       <div class="tabs">
-        <button data-tab="targets">Alvos</button>
-        <button data-tab="settings">Config</button>
-        <button data-tab="log">Log</button>
-        <button data-tab="history">Compras</button>
+        <button data-tab="targets">🎯 Sniper</button>
+        <button data-tab="bids">🔨 Lances</button>
+        <button data-tab="sell">🏷️ Vender</button>
+        <button data-tab="profit">💰 Lucro</button>
+        <button data-tab="settings">⚙️ Config</button>
+        <button data-tab="log">📜 Log</button>
       </div>
       <section data-pane="targets">
         <div data-el="targets"></div>
@@ -1962,9 +2365,52 @@
         <div class="hint" data-el="diag"></div>
       </section>
       <section data-pane="log" hidden><div class="log" data-el="log"></div></section>
-      <section data-pane="history" hidden>
-        <div class="log" data-el="history"></div>
-        <button class="full" data-act="clearHistory">Limpar histórico</button>
+      <section data-pane="bids" hidden>
+        <div class="card">
+          <div class="card-h">🔨 Lances em massa</div>
+          <p class="hint">O bot busca leilões que terminam logo e dá lances até o seu limite. As moedas de cada lance ficam presas até alguém cobrir.</p>
+          <label>Quais cartas</label>
+          <select data-el="bidTarget"></select>
+          <div class="grid">
+            <div><label>Lance máximo por carta</label><input data-el="bidMax" inputmode="numeric" placeholder="Ex.: 1500"></div>
+            <div><label>Quantos lances</label><input data-el="bidCount" inputmode="numeric" value="10"></div>
+            <div><label>Só leilões que terminam em até (min)</label><input data-el="bidMinutes" inputmode="numeric" value="5"></div>
+            <div><label>Máximo de buscas</label><input data-el="bidSearches" inputmode="numeric" value="20"></div>
+          </div>
+          <div class="ed-actions">
+            <button class="go" data-act="bidStart">Dar lances</button>
+            <button class="no" data-act="modStop">Parar</button>
+            <button data-act="bidCollect">Conferir lances</button>
+          </div>
+          <div class="result" data-el="bidResult" hidden></div>
+          <p class="hint">"Conferir lances" olha a sua lista de observação: as cartas ganhas vão para a lista de transferências e entram no Lucro com o valor do lance.</p>
+        </div>
+      </section>
+      <section data-pane="sell" hidden>
+        <div class="card">
+          <div class="card-h">🏷️ Venda em massa</div>
+          <p class="hint">Carrega as cartas não anunciadas (ou expiradas) e agrupa as iguais. Escolha quantas vender e o preço.</p>
+          <label><input type="checkbox" data-el="sellUnassigned"> Incluir "Não atribuídos"</label>
+          <button class="full" data-act="sellLoad">Carregar minhas cartas</button>
+          <div data-el="sellGroups"></div>
+          <div class="ed-actions" data-el="sellActions" hidden>
+            <button class="go" data-act="sellStart">Anunciar selecionadas</button>
+            <button class="no" data-act="modStop">Parar</button>
+          </div>
+          <div class="result" data-el="sellResult" hidden></div>
+        </div>
+      </section>
+      <section data-pane="profit" hidden>
+        <div class="card">
+          <div class="card-h">💰 Lucro</div>
+          <div data-el="profitKpis"></div>
+          <div class="ed-actions">
+            <button class="go" data-act="profitSync">Atualizar com a lista de transferências</button>
+            <button data-act="profitClear">Limpar registro</button>
+          </div>
+          <p class="hint">Compras do bot entram sozinhas. Compras antigas entram pelo "Item bought for" quando a carta está na lista de transferências ou em Não atribuídos. Sempre que você abre a lista de transferências no Web App, o registro é atualizado, inclusive as vendidas, antes de "Limpar vendidos". Lucro = venda − 5% da EA − preço pago.</p>
+          <div class="rows" data-el="profitRows"></div>
+        </div>
       </section>
     `;
 
@@ -1981,7 +2427,8 @@
       panel.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
       panel.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
       if (tab === 'log') renderLog();
-      if (tab === 'history') renderHistory();
+      if (tab === 'profit') renderProfit();
+      if (tab === 'bids') renderBidTargets();
     }
 
     function renderFutbinError() {
@@ -2313,13 +2760,253 @@
       ).join('') || '<div>Nada ainda.</div>';
     }
 
-    function renderHistory() {
-      el('history').innerHTML = app.state.history.map((p) => {
-        const when = new Date(p.at).toLocaleString('pt-BR');
-        const sell = p.sellPrice ? (p.listed ? ' → listado ' : ' → não listado ') + fmt(p.sellPrice) : '';
-        return '<div>' + escapeHtml(when + ' ' + p.name + ' por ' + fmt(p.price) + sell) + '</div>';
-      }).join('') || '<div>Nenhuma compra ainda.</div>';
+    // ---------- Módulos: lucro, lances e venda ----------
+    let modBusy = '';
+    let modStop = false;
+    let sellGroups = [];
+
+    function ledger() {
+      if (!app.state.ledger) app.state.ledger = {};
+      return app.state.ledger;
     }
+
+    function money(n) {
+      return '<b class="' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '') + '">' + (n > 0 ? '+' : '') + fmt(n) + '</b>';
+    }
+
+    function renderProfit() {
+      const sum = ledgerSummary(ledger());
+      el('profitKpis').innerHTML = '<div class="kpis">' +
+        '<div class="kpi"><span>Lucro realizado</span>' + money(sum.profit) + '</div>' +
+        '<div class="kpi"><span>Cartas vendidas</span><b>' + fmt(sum.soldCount) + '</b></div>' +
+        '<div class="kpi"><span>Em estoque</span><b>' + fmt(sum.openCount) + '</b></div>' +
+        '<div class="kpi"><span>Investido no estoque</span><b>' + fmt(sum.openCost) + '</b></div>' +
+        '</div>' + (sum.unknownCost ? '<p class="hint">' + sum.unknownCost + ' carta(s) sem preço de compra conhecido não entram no cálculo.</p>' : '');
+      const entries = Object.values(ledger()).sort((a, b) => (b.soldAt || b.boughtAt || 0) - (a.soldAt || a.boughtAt || 0)).slice(0, 80);
+      el('profitRows').innerHTML = entries.map((e) => {
+        const p = entryProfit(e);
+        const detail = e.status === 'vendida'
+          ? 'pago ' + (e.cost ? fmt(e.cost) : '?') + ' → vendida ' + fmt(e.soldFor)
+          : 'pago ' + (e.cost ? fmt(e.cost) : '?') + ' · ' + e.status + (e.listedFor ? ' (' + fmt(e.listedFor) + ')' : '');
+        return '<div class="r"><div>' + escapeHtml((e.name || 'carta') + (e.rating ? ' ' + e.rating : '')) +
+          '<br><small style="color:#9aa3b2">' + escapeHtml(detail) + '</small></div><div>' + (p == null ? '' : money(p)) + '</div></div>';
+      }).join('') || '<p class="hint">Nada registrado ainda.</p>';
+    }
+
+    function applySync(items, quiet) {
+      const ch = syncLedger(ledger(), items);
+      ch.sold.forEach((e) => {
+        const p = entryProfit(e);
+        log('Vendida: ' + e.name + ' por ' + fmt(e.soldFor) + (p == null ? '' : ' · lucro ' + (p > 0 ? '+' : '') + fmt(p) + ' (já sem os 5% da EA)'), 'success');
+      });
+      save();
+      if (tab === 'profit' && !panel.hidden) renderProfit();
+      if (!quiet) log('Lucro atualizado: ' + items.length + ' carta(s) lidas, ' + ch.added + ' nova(s), ' + ch.sold.length + ' venda(s).', 'success');
+    }
+
+    async function syncProfit() {
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      modBusy = 'lucro';
+      try {
+        for (const which of ['transfer', 'unassigned']) {
+          const r = await adapter.pile(which);
+          if (r.success) applySync(r.items);
+          else log('Não consegui ler ' + (which === 'transfer' ? 'a lista de transferências' : 'Não atribuídos') +
+            (r.missing ? ' (função não encontrada no Web App)' : ' (erro ' + r.status + ')') + '.', 'warn');
+        }
+      } finally {
+        modBusy = '';
+      }
+    }
+
+    // Lances: alvos de jogador/consumível existentes ou a última busca do mercado.
+    function bidTargets() {
+      const list = app.state.targets.filter((t) => t.kind).map((t) => ({ id: t.id, label: t.name, target: t }));
+      if (app.captured && kindFromCriteria(app.captured)) {
+        const kind = kindFromCriteria(app.captured);
+        list.unshift({
+          id: '__captured',
+          label: 'Última busca do mercado: ' + targetParts({ kind, criteria: app.captured, labels: app.capturedLabels }, names).join(' · '),
+          target: { kind, criteria: app.captured, labels: app.capturedLabels },
+        });
+      }
+      return list;
+    }
+
+    function renderBidTargets() {
+      const sel = el('bidTarget');
+      const cur = sel.value;
+      const list = bidTargets();
+      sel.innerHTML = list.length
+        ? list.map((x) => '<option value="' + escapeHtml(x.id) + '"' + (x.id === cur ? ' selected' : '') + '>' + escapeHtml(x.label) + '</option>').join('')
+        : '<option value="">Crie um alvo no Sniper ou faça uma busca no mercado</option>';
+    }
+
+    async function startBids() {
+      if (modBusy || engine.running) return win.alert('Pare o sniper/módulo antes de dar lances.');
+      const choice = bidTargets().find((x) => x.id === el('bidTarget').value);
+      if (!choice) return win.alert('Escolha quais cartas.');
+      const plan = {
+        target: Object.assign({}, choice.target, { maxBuy: 999999999 }),
+        maxBid: parseCoins(el('bidMax').value),
+        maxBids: parseCoins(el('bidCount').value),
+        maxExpires: parseCoins(el('bidMinutes').value) * 60,
+        maxSearches: parseCoins(el('bidSearches').value) || 20,
+      };
+      if (plan.maxBid < 150) return win.alert('Informe o lance máximo por carta (mínimo 150).');
+      if (!(plan.maxBids > 0)) return win.alert('Informe quantos lances dar.');
+      const problem = targetProblem(Object.assign({}, plan.target, { maxBuy: 1000 }));
+      if (problem) return win.alert('Não dá para usar essas cartas: ' + problem + '.');
+      const total = plan.maxBid * plan.maxBids;
+      if (!win.confirm('Lances em massa:\n\n' + describeTarget(plan.target, names) + '\nAté ' + plan.maxBids + ' lance(s) de no máximo ' +
+        fmt(plan.maxBid) + ' (até ' + fmt(total) + ' moedas presas)\nLeilões que terminam em até ' + (plan.maxExpires / 60) + ' min' +
+        (app.state.settings.dryRun ? '\n\n(Modo simulação: nenhum lance será dado.)' : ''))) return;
+      modBusy = 'lances';
+      modStop = false;
+      el('bidResult').hidden = false;
+      el('bidResult').textContent = 'Dando lances…';
+      log('Lances em massa iniciados.');
+      try {
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, isStopped: () => modStop });
+        el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
+          (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
+        log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
+      } finally {
+        modBusy = '';
+      }
+    }
+
+    async function collectBids() {
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      modBusy = 'lances';
+      el('bidResult').hidden = false;
+      el('bidResult').textContent = 'Conferindo lista de observação…';
+      try {
+        const r = await collectWonBids({ adapter, ledger: ledger(), log, settings: app.state.settings });
+        save();
+        el('bidResult').innerHTML = r.error ? 'Não consegui: ' + escapeHtml(r.error)
+          : 'Ganhou <b>' + r.ganhou + '</b> (movidas para a lista: ' + r.moved + ') · ganhando ' + r.ganhando +
+            ' · superado ' + r.superado + ' · perdeu ' + r.perdeu + '.';
+      } finally {
+        modBusy = '';
+      }
+    }
+
+    // Venda: carrega, agrupa e mostra cada grupo com quantidade e preço.
+    async function loadSellable() {
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      modBusy = 'venda';
+      el('sellGroups').innerHTML = '<p class="hint">Carregando…</p>';
+      try {
+        const piles = ['transfer'].concat(el('sellUnassigned').checked ? ['unassigned'] : []);
+        let items = [];
+        for (const which of piles) {
+          const r = await adapter.pile(which);
+          if (!r.success) {
+            el('sellGroups').innerHTML = '<p class="hint">Não consegui ler as cartas' +
+              (r.missing ? ' (função não encontrada no Web App)' : ' (erro ' + r.status + ')') + '.</p>';
+            return;
+          }
+          applySync(r.items, true);
+          items = items.concat(r.items);
+        }
+        sellGroups = groupSellable(items, ledger());
+        renderSellGroups();
+      } finally {
+        modBusy = '';
+      }
+    }
+
+    function suggestionFor(g) {
+      return g.futbin > 0 ? g.futbin : g.marketAverage > 0 ? g.marketAverage : 0;
+    }
+
+    function renderSellGroups() {
+      el('sellActions').hidden = !sellGroups.length;
+      if (!sellGroups.length) {
+        el('sellGroups').innerHTML = '<p class="hint">Nenhuma carta para anunciar (as já anunciadas ou intransferíveis não aparecem).</p>';
+        return;
+      }
+      el('sellGroups').innerHTML = sellGroups.map((g) => {
+        const sug = suggestionFor(g);
+        const ref = [g.marketAverage ? 'Média EA ' + fmt(g.marketAverage) : '', g.futbin ? 'FUTBIN ' + fmt(g.futbin) : '',
+          g.avgCost ? 'pago em média ' + fmt(g.avgCost) : 'preço pago desconhecido'].filter(Boolean).join(' · ');
+        return '<div class="card sg" data-key="' + escapeHtml(g.key) + '">' +
+          '<div class="sg-top"><b>' + escapeHtml(g.name + (g.rating ? ' ' + g.rating : '')) + '</b><span class="sg-count">Você tem ' + g.count + '</span></div>' +
+          '<p class="hint">' + escapeHtml(ref) + (g.minPrice ? ' · EA permite ' + fmt(g.minPrice) + '–' + fmt(g.maxPrice) : '') + '</p>' +
+          '<div class="grid3">' +
+          '<div><label>Quantas</label><input data-s="qty" inputmode="numeric" value="0"></div>' +
+          '<div><label>Compre já</label><input data-s="bin" inputmode="numeric" value="' + (sug ? roundDown(sug) : '') + '"></div>' +
+          '<div><label>Lance inicial</label><input data-s="start" inputmode="numeric" placeholder="auto"></div>' +
+          '</div>' +
+          '<div class="ed-actions"><select data-s="duration"><option value="3600">1 hora</option><option value="10800">3 horas</option>' +
+          '<option value="21600">6 horas</option><option value="43200">12 horas</option><option value="86400">1 dia</option>' +
+          '<option value="259200">3 dias</option></select>' +
+          '<button data-act="sellFutbin" data-key="' + escapeHtml(g.key) + '">Preço FUTBIN</button></div>' +
+          '<div class="hint" data-s="est"></div></div>';
+      }).join('');
+      panel.querySelectorAll('.sg').forEach(updateEstimate);
+    }
+
+    function readOrder(card) {
+      const g = sellGroups.find((x) => x.key === card.dataset.key);
+      const val = (k) => card.querySelector('[data-s="' + k + '"]').value;
+      const qty = Math.min(parseCoins(val('qty')), g.count);
+      const prices = sellPrices(g, parseCoins(val('bin')), parseCoins(val('start')));
+      return { group: g, qty, duration: parseInt(val('duration'), 10) || 3600, prices };
+    }
+
+    function updateEstimate(card) {
+      const o = readOrder(card);
+      const box = card.querySelector('[data-s="est"]');
+      if (!o.qty) { box.textContent = 'Escolha quantas vender.'; return; }
+      if (o.prices.error) { box.innerHTML = '<span class="neg">' + escapeHtml(o.prices.error) + '</span>'; return; }
+      const net = netAfterTax(o.prices.bin);
+      box.innerHTML = o.qty + '× por ' + fmt(o.prices.bin) + ' (lance inicial ' + fmt(o.prices.start) + ') → você recebe ' + fmt(net) +
+        ' cada, já sem os 5% da EA' +
+        (o.prices.profitPerCard != null ? ' · lucro ' + money(o.prices.profitPerCard) + ' cada, ' + money(o.prices.profitPerCard * o.qty) + ' no total' : '') +
+        (o.prices.notes.length ? ' · ' + escapeHtml(o.prices.notes.join(', ')) : '');
+    }
+
+    async function futbinForGroup(key) {
+      const g = sellGroups.find((x) => x.key === key);
+      if (!g || !g.definitionId) return;
+      try {
+        const r = await futbin.price({ name: g.name, definitionId: g.definitionId, rating: g.rating }, app.state.settings.platform);
+        g.futbin = r.price;
+        renderSellGroups();
+      } catch (err) {
+        win.alert('FUTBIN: ' + err.message + '. Use a média da EA ou digite o preço.');
+      }
+    }
+
+    async function startSell() {
+      if (modBusy || engine.running) return win.alert('Pare o sniper/módulo antes de vender.');
+      const orders = [];
+      for (const card of panel.querySelectorAll('.sg')) {
+        const o = readOrder(card);
+        if (!o.qty) continue;
+        if (o.prices.error) return win.alert(o.group.name + ': ' + o.prices.error + '.');
+        orders.push({ group: o.group, qty: o.qty, bin: o.prices.bin, start: o.prices.start, duration: o.duration });
+      }
+      if (!orders.length) return win.alert('Escolha a quantidade de pelo menos uma carta.');
+      const summary = orders.map((o) => o.qty + '× ' + o.group.name + ' ' + (o.group.rating || '') + ' por ' + fmt(o.bin)).join('\n');
+      if (!win.confirm('Anunciar:\n\n' + summary + (app.state.settings.dryRun ? '\n\n(Modo simulação: nada será anunciado.)' : ''))) return;
+      modBusy = 'venda';
+      modStop = false;
+      el('sellResult').hidden = false;
+      el('sellResult').textContent = 'Anunciando…';
+      try {
+        const r = await runBulkSell({ adapter, orders, ledger: ledger(), settings: app.state.settings, log, isStopped: () => modStop });
+        save();
+        el('sellResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.listed || r.simulated) + '</b> carta(s) ' +
+          (r.simulated ? 'simuladas' : 'anunciadas') + (r.failed ? ', ' + r.failed + ' com erro' : '') + '.';
+      } finally {
+        modBusy = '';
+      }
+      if (!app.state.settings.dryRun) loadSellable();
+    }
+
 
     function onCaptured(criteria, card) {
       if (!card) {
@@ -2450,6 +3137,7 @@
         const a = act.dataset.act;
         if (a === 'close') panel.hidden = true;
         if (a === 'start') {
+          if (modBusy) return win.alert('Espere o módulo de ' + modBusy + ' terminar (ou toque em Parar nele).');
           if (!app.state.targets.some((t) => t.enabled)) return win.alert('Adicione e ative pelo menos um alvo.');
           engine.start();
           requestWakeLock();
@@ -2478,11 +3166,18 @@
           rows.unshift(['versão do script: ' + SCRIPT_VERSION, true]);
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
         }
-        if (a === 'clearHistory' && win.confirm('Apagar o histórico de compras?')) {
-          app.state.history = [];
+        if (a === 'profitSync') syncProfit();
+        if (a === 'profitClear' && win.confirm('Apagar todo o registro de compras e lucro?')) {
+          app.state.ledger = {};
           save();
-          renderHistory();
+          renderProfit();
         }
+        if (a === 'bidStart') startBids();
+        if (a === 'bidCollect') collectBids();
+        if (a === 'sellLoad') loadSellable();
+        if (a === 'sellStart') startSell();
+        if (a === 'sellFutbin') futbinForGroup(act.dataset.key);
+        if (a === 'modStop') { modStop = true; log('Parando o módulo…', 'warn'); }
         return;
       }
       const tg = e.target.closest('.tg');
@@ -2550,7 +3245,17 @@
       }
     });
 
+    panel.addEventListener('input', (e) => {
+      const card = e.target.closest('.sg');
+      if (card && e.target.dataset.s) updateEstimate(card);
+    });
+
     panel.addEventListener('change', (e) => {
+      if (e.target.dataset.s) {
+        const card = e.target.closest('.sg');
+        if (card) updateEstimate(card);
+        return;
+      }
       const key = e.target.dataset.setting;
       if (key === 'priceSource') {
         app.state.settings.priceSource = e.target.value === 'futbin' ? 'futbin' : 'ea';
@@ -2625,6 +3330,9 @@
     return {
       log,
       onCaptured,
+      syncFromTransferList(items) {
+        applySync(items, true);
+      },
       refreshTargets() {
         renderTargets();
       },
@@ -2638,7 +3346,7 @@
       refresh() {
         if (panel.hidden) return;
         renderStatus();
-        if (tab === 'history') renderHistory();
+        if (tab === 'profit') renderProfit();
       },
     };
   }
@@ -2678,6 +3386,8 @@
       onPurchase: (p) => {
         app.state.history.unshift(p);
         if (app.state.history.length > 100) app.state.history.length = 100;
+        if (!app.state.ledger) app.state.ledger = {};
+        recordBuy(app.state.ledger, { itemId: p.itemId, name: p.name, rating: p.rating, definitionId: p.definitionId, price: p.price, source: 'bot', at: p.at });
         store.save(app.state);
       },
       // Alvos criados por ID ainda não sabem qual é a carta; a primeira busca
@@ -2706,6 +3416,7 @@
       if (!adapter.ready()) return;
       clearInterval(timer);
       adapter.hookManualSearch((criteria, card) => ui.onCaptured(criteria, card));
+      adapter.hookTransferList((items) => ui.syncFromTransferList(items));
       if (loadChemStyles(adapter.localize())) ui.refreshFilters();
       const hooks = overlay.install();
       ui.log('Web App detectado. Pronto para usar.', 'success');
@@ -2728,6 +3439,8 @@
     searchByName, parsePlayersDb, searchPlayers, validName,
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
+    ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, runBulkBids, collectWonBids, runBulkSell,
+    nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

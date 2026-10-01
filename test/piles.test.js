@@ -58,3 +58,51 @@ test('venda pula cartas que o Web App ainda não carregou', async () => {
   assert.equal(r.failed, 1);
   assert.ok(logs.some((m) => /abra a lista de transferências/.test(m)));
 });
+
+test('"intransferível" como função não marca toda carta como intransferível', () => {
+  assert.equal(ab.readFlag({ untradeable() { return false; } }, ['untradeable', 'isUntradeable']), false);
+  assert.equal(ab.readFlag({ untradeable() { return true; } }, ['untradeable']), true);
+  assert.equal(ab.readFlag({ isUntradeable: () => true }, ['untradeable', 'isUntradeable']), true);
+  assert.equal(ab.readFlag({ _untradeable: false }, ['untradeable']), false);
+  assert.equal(ab.readFlag({}, ['untradeable']), false);
+  assert.equal(ab.readFlag({ untradeable: 1 }, ['untradeable']), true);
+});
+
+test('adaptador lê cartas da lista com untradeable em função e leilão via getAuctionData', async () => {
+  class Entity {
+    constructor(id) { this.id = id; this.definitionId = 50; this.rating = 85; this.type = 'player'; this._staticData = { name: 'Le Tissier' }; }
+    untradeable() { return false; }
+    getAuctionData() { return { tradeState: this.id === 3 ? 'active' : 'inactive', buyNowPrice: 0 }; }
+  }
+  const win = {
+    UTSearchCriteriaDTO: function () {},
+    services: { Item: { requestTransferItems() {
+      return { observe(scope, cb) { cb({}, { success: true, status: 200, data: { items: [new Entity(1), new Entity(2), new Entity(3)] } }); } };
+    } } },
+  };
+  const ad = ab.createEaAdapter(win);
+  const r = await ad.pile('transfer');
+  assert.equal(r.success, true);
+  assert.equal(r.items.length, 3);
+  assert.deepEqual(ab.sellableStats(r.items), { total: 3, ready: 2, listed: 1, sold: 0, untradeable: 0 });
+  const groups = ab.groupSellable(r.items, {});
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].count, 2);
+});
+
+test('ID da carta como texto ainda entra no registro e na venda', async () => {
+  const win = {
+    UTSearchCriteriaDTO: function () {},
+    services: { Item: { requestTransferItems() {
+      return { observe(scope, cb) { cb({}, { success: true, data: { items: [
+        { id: '412345678901', definitionId: 50, rating: 85, type: 'player', lastSalePrice: '2000', _staticData: { name: 'Bronze' }, _auction: {} },
+      ] } }); } };
+    } } },
+  };
+  const r = await ab.createEaAdapter(win).pile('transfer');
+  assert.equal(r.items[0].id, 412345678901);
+  assert.equal(r.items[0].lastSalePrice, 2000);
+  const ledger = {};
+  ab.syncLedger(ledger, r.items);
+  assert.equal(ledger.i412345678901.cost, 2000);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.0.1
+// @version      1.0.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.0.1';
+  const SCRIPT_VERSION = '1.0.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1463,6 +1463,19 @@
     })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }
 
+  // Conta por que cada carta lida entra ou não na venda (mostrado na tela).
+  function sellableStats(items) {
+    const st = { total: 0, ready: 0, listed: 0, sold: 0, untradeable: 0 };
+    for (const it of items || []) {
+      st.total++;
+      if (it.untradeable) st.untradeable++;
+      else if (it.tradeState === 'active') st.listed++;
+      else if (it.tradeState === 'closed') st.sold++;
+      else st.ready++;
+    }
+    return st;
+  }
+
   // Confere e ajusta o preço de venda: degraus da EA, faixa permitida pela EA
   // e lance inicial abaixo do "compre já".
   function sellPrices(group, bin, start) {
@@ -1987,6 +2000,31 @@
 
   // O Web App expõe objetos globais (services, UTSearchCriteriaDTO...). O bot
   // usa esses mesmos objetos, então as requisições saem idênticas às do app.
+  // Lê um sinal da carta que pode ser campo, campo com "_" ou função
+  // (ex.: untradeable, isUntradeable()). Função nunca vira "verdadeiro" sem ser chamada.
+  function readFlag(raw, names) {
+    for (const name of names) {
+      for (const key of [name, '_' + name]) {
+        let v;
+        try { v = raw[key]; } catch (e) { v = undefined; }
+        if (typeof v === 'function') {
+          try { v = v.call(raw); } catch (e) { v = undefined; }
+        }
+        if (typeof v === 'boolean') return v;
+        if (typeof v === 'number') return v !== 0;
+      }
+    }
+    return false;
+  }
+
+  function auctionOf(raw) {
+    if (raw._auction && typeof raw._auction === 'object') return raw._auction;
+    try {
+      if (typeof raw.getAuctionData === 'function') return raw.getAuctionData() || {};
+    } catch (e) { /* ignora */ }
+    return raw.auctionInfo || {};
+  }
+
   // Tipo do item que veio na busca: 'player', 'training' (consumível) ou outro.
   // Sem confirmação, devolve null, e o bot não compra.
   function itemKindOf(raw) {
@@ -2045,7 +2083,7 @@
     }
 
     function toItem(raw) {
-      const a = raw._auction || {};
+      const a = auctionOf(raw);
       return {
         raw,
         tradeId: a.tradeId,
@@ -2062,14 +2100,14 @@
         position: any(raw, 'preferredPosition'),
         positions: list(raw, 'possiblePositions'),
         playStyles: readPlayStyles(raw),
-        id: field(raw, 'id'),
-        lastSalePrice: field(raw, 'lastSalePrice') || 0,
+        id: numberOf(raw, 'id'),
+        lastSalePrice: numberOf(raw, 'lastSalePrice') || 0,
         tradeState: a.tradeState || null,
         currentBid: a.currentBid || 0,
         startingBid: a.startingBid || 0,
         bidState: a.bidState || null,
         tradeOwner: !!a.tradeOwner,
-        untradeable: !!(raw.untradeable != null ? raw.untradeable : raw._untradeable),
+        untradeable: readFlag(raw, ['untradeable', 'isUntradeable']),
         marketAverage: eaMarketAverage(raw),
         minPrice: priceLimit(raw, 'min'),
         maxPrice: priceLimit(raw, 'max'),
@@ -2088,6 +2126,16 @@
     function field(raw, name) {
       const v = raw[name] != null ? raw[name] : raw['_' + name];
       return typeof v === 'number' ? v : undefined;
+    }
+
+    // Número que pode vir como texto (ex.: ID grande da carta).
+    function numberOf(raw, name) {
+      let v = raw[name] != null ? raw[name] : raw['_' + name];
+      if (typeof v === 'function') {
+        try { v = v.call(raw); } catch (e) { v = undefined; }
+      }
+      const n = typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v;
+      return typeof n === 'number' && isFinite(n) ? n : undefined;
     }
 
     function any(raw, name) {
@@ -2950,8 +2998,11 @@
     // Lê uma pilha: primeiro pela função do Web App; se não der, usa o que o
     // Web App carregou quando você abriu a tela. Liga cada carta ao objeto
     // que o Web App desenhou (necessário para anunciar).
+    let lastPileMethod = '';
+
     async function readPile(which) {
       const r = await adapter.pile(which, deps.lookup);
+      lastPileMethod = r.success ? r.method || '' : 'dados carregados pelo Web App';
       const cap = deps.piles && deps.piles[which];
       let items = r.success ? r.items : cap ? cap.items : null;
       let source = r.success ? 'web app' : cap ? 'captura' : null;
@@ -3099,11 +3150,17 @@
         }
         sellGroups = groupSellable(items, ledger());
         renderSellGroups();
+        const st = sellableStats(items);
         const missing = sellGroups.reduce((n, g) => n + g.items.filter((it) => !it.raw).length, 0);
-        if (notes.length || missing) {
-          el('sellGroups').insertAdjacentHTML('afterbegin', '<p class="hint">' + escapeHtml(notes.join(' · ')) +
-            (missing ? (notes.length ? ' · ' : '') + missing + ' carta(s) ainda não apareceram na tela: para anunciá-las, abra a lista de transferências no Web App e role até vê-las.' : '') + '</p>');
+        const summary = 'Li ' + st.total + ' carta(s)' + (lastPileMethod ? ' (via ' + lastPileMethod + ')' : '') + ': ' + st.ready +
+          ' para vender, ' + st.listed + ' já anunciada(s), ' + st.sold + ' vendida(s), ' + st.untradeable + ' intransferível(is).';
+        el('sellGroups').insertAdjacentHTML('afterbegin', '<p class="captured">' + escapeHtml(summary) + '</p>' +
+          (notes.length || missing ? '<p class="hint">' + escapeHtml(notes.join(' · ')) +
+            (missing ? (notes.length ? ' · ' : '') + missing + ' carta(s) ainda não apareceram na tela: para anunciá-las, abra a lista de transferências no Web App e role até vê-las.' : '') + '</p>' : ''));
+        if (!st.total) {
+          el('sellGroups').insertAdjacentHTML('beforeend', '<p class="hint">' + pileHelp('transfer') + '</p>');
         }
+        log('Venda: ' + summary, st.ready ? 'success' : 'warn');
       } finally {
         modBusy = '';
       }
@@ -3651,7 +3708,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, runBulkBids, collectWonBids, runBulkSell,
-    findPileMethod, pileFromUrl, itemFromJson, itemsFromPileJson, installPileCapture,
+    findPileMethod, pileFromUrl, itemFromJson, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

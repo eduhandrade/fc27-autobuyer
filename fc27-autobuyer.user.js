@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.0.2
+// @version      1.1.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.0.2';
+  const SCRIPT_VERSION = '1.1.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1359,10 +1359,68 @@
     return netAfterTax(e.soldFor) - e.cost;
   }
 
-  function ledgerSummary(ledger) {
-    const out = { soldCount: 0, revenue: 0, soldCost: 0, profit: 0, openCount: 0, openCost: 0, unknownCost: 0 };
+  // Período { from, to } em milissegundos (inclusive). Sem período = tudo.
+  function inPeriod(ts, period) {
+    if (!period) return true;
+    if (!(ts > 0)) return false;
+    return (!(period.from > 0) || ts >= period.from) && (!(period.to > 0) || ts <= period.to);
+  }
+
+  // Dia local (AAAA-MM-DD) de um instante.
+  function dayKey(ts) {
+    const d = new Date(ts);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  // Início e fim (locais) de um dia "AAAA-MM-DD".
+  function dayRange(key) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key || ''));
+    if (!m) return null;
+    const start = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+    return { from: start, to: new Date(+m[1], +m[2] - 1, +m[3] + 1).getTime() - 1 };
+  }
+
+  // Períodos prontos: hoje, 7 dias, 30 dias, este mês, mês passado, tudo.
+  function presetPeriod(name, now) {
+    const d = new Date(now || Date.now());
+    const today = dayRange(dayKey(d.getTime()));
+    const back = (n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - n).getTime();
+    if (name === 'today') return today;
+    if (name === '7d') return { from: back(6), to: today.to };
+    if (name === '30d') return { from: back(29), to: today.to };
+    if (name === 'month') return { from: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), to: today.to };
+    if (name === 'lastMonth') {
+      return { from: new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime(), to: new Date(d.getFullYear(), d.getMonth(), 1).getTime() - 1 };
+    }
+    return null;
+  }
+
+  // Lucro e vendas por dia dentro do período (mais recente primeiro).
+  function dailyProfit(ledger, period) {
+    const days = new Map();
     for (const e of Object.values(ledger || {})) {
+      if (e.status !== 'vendida' || !inPeriod(e.soldAt, period)) continue;
+      const p = entryProfit(e);
+      if (p == null) continue;
+      const k = dayKey(e.soldAt);
+      const d = days.get(k) || { day: k, count: 0, profit: 0 };
+      d.count++;
+      d.profit += p;
+      days.set(k, d);
+    }
+    return Array.from(days.values()).sort((a, b) => (a.day < b.day ? 1 : -1));
+  }
+
+  // Resumo: vendas e compras entram pelo período; o estoque é sempre o atual.
+  function ledgerSummary(ledger, period) {
+    const out = { soldCount: 0, revenue: 0, soldCost: 0, profit: 0, openCount: 0, openCost: 0, unknownCost: 0, boughtCount: 0, boughtCost: 0 };
+    for (const e of Object.values(ledger || {})) {
+      if (period && inPeriod(e.boughtAt, period)) {
+        out.boughtCount++;
+        out.boughtCost += e.cost > 0 ? e.cost : 0;
+      }
       if (e.status === 'vendida') {
+        if (!inPeriod(e.soldAt, period)) continue;
         const p = entryProfit(e);
         if (p == null) { out.unknownCost++; continue; }
         out.soldCount++;
@@ -2605,7 +2663,14 @@
       <section data-pane="profit" hidden>
         <div class="card">
           <div class="card-h">💰 Lucro</div>
+          <div class="ed-h">Período</div>
+          <div class="chips" data-el="periodChips"></div>
+          <div class="grid" data-el="periodCustom" hidden>
+            <div><label>De</label><input type="date" data-el="periodFrom"></div>
+            <div><label>Até</label><input type="date" data-el="periodTo"></div>
+          </div>
           <div data-el="profitKpis"></div>
+          <div data-el="profitDays"></div>
           <div class="ed-actions">
             <button class="go" data-act="profitSync">Atualizar com a lista de transferências</button>
             <button data-act="profitClear">Limpar registro</button>
@@ -2976,23 +3041,61 @@
       return '<b class="' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '') + '">' + (n > 0 ? '+' : '') + fmt(n) + '</b>';
     }
 
+    const PERIODS = [['today', 'Hoje'], ['7d', '7 dias'], ['30d', '30 dias'], ['month', 'Este mês'], ['lastMonth', 'Mês passado'],
+      ['all', 'Tudo'], ['custom', 'Escolher datas']];
+    let periodName = 'all';
+
+    function currentPeriod() {
+      if (periodName !== 'custom') return presetPeriod(periodName);
+      const from = dayRange(el('periodFrom').value);
+      const to = dayRange(el('periodTo').value);
+      if (!from && !to) return null;
+      return { from: from ? from.from : 0, to: to ? to.to : 0 };
+    }
+
+    function periodLabel(period) {
+      if (!period) return 'todo o período';
+      const f = (ts) => new Date(ts).toLocaleDateString('pt-BR');
+      return (period.from ? f(period.from) : 'início') + ' a ' + (period.to ? f(period.to) : 'hoje');
+    }
+
     function renderProfit() {
-      const sum = ledgerSummary(ledger());
-      el('profitKpis').innerHTML = '<div class="kpis">' +
-        '<div class="kpi"><span>Lucro realizado</span>' + money(sum.profit) + '</div>' +
+      el('periodChips').innerHTML = PERIODS.map((p) =>
+        '<button type="button" class="chip' + (periodName === p[0] ? ' on' : '') + '" data-period="' + p[0] + '">' + p[1] + '</button>').join('');
+      el('periodCustom').hidden = periodName !== 'custom';
+      const period = currentPeriod();
+      const sum = ledgerSummary(ledger(), period);
+      el('profitKpis').innerHTML = '<p class="captured">Período: <b>' + escapeHtml(periodLabel(period)) + '</b></p><div class="kpis">' +
+        '<div class="kpi"><span>Lucro no período</span>' + money(sum.profit) + '</div>' +
         '<div class="kpi"><span>Cartas vendidas</span><b>' + fmt(sum.soldCount) + '</b></div>' +
-        '<div class="kpi"><span>Em estoque</span><b>' + fmt(sum.openCount) + '</b></div>' +
+        '<div class="kpi"><span>Recebido (sem os 5%)</span><b>' + fmt(sum.revenue) + '</b></div>' +
+        '<div class="kpi"><span>Custo das vendidas</span><b>' + fmt(sum.soldCost) + '</b></div>' +
+        (period ? '<div class="kpi"><span>Compradas no período</span><b>' + fmt(sum.boughtCount) + '</b></div>' +
+          '<div class="kpi"><span>Gasto em compras</span><b>' + fmt(sum.boughtCost) + '</b></div>' : '') +
+        '<div class="kpi"><span>Em estoque agora</span><b>' + fmt(sum.openCount) + '</b></div>' +
         '<div class="kpi"><span>Investido no estoque</span><b>' + fmt(sum.openCost) + '</b></div>' +
-        '</div>' + (sum.unknownCost ? '<p class="hint">' + sum.unknownCost + ' carta(s) sem preço de compra conhecido não entram no cálculo.</p>' : '');
-      const entries = Object.values(ledger()).sort((a, b) => (b.soldAt || b.boughtAt || 0) - (a.soldAt || a.boughtAt || 0)).slice(0, 80);
+        '</div>' + (sum.unknownCost ? '<p class="hint">' + sum.unknownCost + ' carta(s) sem preço de compra conhecido não entram no cálculo.</p>' : '') +
+        '<p class="hint">A data da venda é quando o script viu a carta como vendida (ao abrir a lista de transferências).</p>';
+      const days = dailyProfit(ledger(), period);
+      el('profitDays').innerHTML = days.length > 1
+        ? '<div class="ed-h">Por dia</div><div class="rows">' + days.map((d) => {
+          const r = dayRange(d.day);
+          return '<div class="r"><div>' + new Date(r.from).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' }) +
+            ' · ' + d.count + ' venda(s)</div><div>' + money(d.profit) + '</div></div>';
+        }).join('') + '</div>'
+        : '';
+      const entries = Object.values(ledger())
+        .filter((e) => !period || inPeriod(e.status === 'vendida' ? e.soldAt : e.boughtAt, period))
+        .sort((a, b) => (b.soldAt || b.boughtAt || 0) - (a.soldAt || a.boughtAt || 0)).slice(0, 80);
       el('profitRows').innerHTML = entries.map((e) => {
         const p = entryProfit(e);
         const detail = e.status === 'vendida'
           ? 'pago ' + (e.cost ? fmt(e.cost) : '?') + ' → vendida ' + fmt(e.soldFor)
           : 'pago ' + (e.cost ? fmt(e.cost) : '?') + ' · ' + e.status + (e.listedFor ? ' (' + fmt(e.listedFor) + ')' : '');
         return '<div class="r"><div>' + escapeHtml((e.name || 'carta') + (e.rating ? ' ' + e.rating : '')) +
-          '<br><small style="color:#9aa3b2">' + escapeHtml(detail) + '</small></div><div>' + (p == null ? '' : money(p)) + '</div></div>';
-      }).join('') || '<p class="hint">Nada registrado ainda.</p>';
+          '<br><small style="color:#9aa3b2">' + escapeHtml(detail + ' · ' + new Date(e.status === 'vendida' ? e.soldAt : e.boughtAt).toLocaleDateString('pt-BR')) +
+          '</small></div><div>' + (p == null ? '' : money(p)) + '</div></div>';
+      }).join('') || '<p class="hint">Nada registrado ' + (period ? 'neste período' : 'ainda') + '.</p>';
     }
 
     // Lê uma pilha: primeiro pela função do Web App; se não der, usa o que o
@@ -3380,6 +3483,16 @@
     });
 
     panel.addEventListener('click', (e) => {
+      const periodBtn = e.target.closest('[data-period]');
+      if (periodBtn) {
+        periodName = periodBtn.dataset.period;
+        if (periodName === 'custom' && !el('periodFrom').value) {
+          el('periodFrom').value = dayKey(Date.now() - 6 * 86400000);
+          el('periodTo').value = dayKey(Date.now());
+        }
+        renderProfit();
+        return;
+      }
       const tabBtn = e.target.closest('[data-tab]');
       if (tabBtn) { tab = tabBtn.dataset.tab; renderTabs(); return; }
       const act = e.target.closest('[data-act]');
@@ -3504,6 +3617,10 @@
     });
 
     panel.addEventListener('change', (e) => {
+      if (e.target.dataset.el === 'periodFrom' || e.target.dataset.el === 'periodTo') {
+        renderProfit();
+        return;
+      }
       if (e.target.dataset.s) {
         const card = e.target.closest('.sg');
         if (card) updateEstimate(card);
@@ -3707,7 +3824,7 @@
     searchByName, parsePlayersDb, searchPlayers, validName,
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
-    ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, runBulkBids, collectWonBids, runBulkSell,
+    ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     findPileMethod, pileFromUrl, itemFromJson, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };

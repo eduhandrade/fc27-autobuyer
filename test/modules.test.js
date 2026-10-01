@@ -36,7 +36,7 @@ test('registro: compras antigas entram pelo "Item bought for"', () => {
   assert.equal(ledger.i3.soldFor, 4000);
   assert.equal(ab.entryProfit(ledger.i3), 800);
   const sum = ab.ledgerSummary(ledger);
-  assert.deepEqual(sum, { soldCount: 1, revenue: 3800, soldCost: 3000, profit: 800, openCount: 2, openCost: 12750, unknownCost: 1 });
+  assert.deepEqual(sum, { soldCount: 1, revenue: 3800, soldCost: 3000, profit: 800, openCount: 2, openCost: 12750, unknownCost: 1, boughtCount: 0, boughtCost: 0 });
 });
 
 test('lances: próximo lance e cartas escolhidas', () => {

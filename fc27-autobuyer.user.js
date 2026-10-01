@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.0.0
+// @version      1.0.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.0.0';
+  const SCRIPT_VERSION = '1.0.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1062,7 +1062,7 @@
     return view.__root || view._root || null;
   }
 
-  function createPriceOverlay(win, prices, getSettings, onError) {
+  function createPriceOverlay(win, prices, getSettings, onError, registry) {
     onError = onError || function () {};
     const installed = [];
 
@@ -1145,10 +1145,11 @@
     }
 
     function show(view, args, kind) {
+      const item = itemFromView(view, args);
+      if (registry && item && item.id > 0) registry.set(item.id, item);
       const settings = getSettings();
       if (!settings.showCardPrices) return;
       counters.calls++;
-      const item = itemFromView(view, args);
       const root = rootFromView(view);
       if (!root || !root.querySelector || !isPlayerItem(item)) return;
       const card = { name: itemNameOf(item), definitionId: item.definitionId, rating: item.rating };
@@ -1338,6 +1339,8 @@
       } else if (!(e.cost > 0) && it.lastSalePrice > 0) {
         e.cost = it.lastSalePrice;
       }
+      // Troca o nome provisório ("Carta 85 #50") pelo nome real quando aparecer.
+      if (it.name && /^Carta /.test(e.name || '') && !/^Carta /.test(it.name)) e.name = it.name;
       const state = SALE_STATES[it.tradeState] || (it.tradeState ? it.tradeState : 'na lista');
       if (e.status === 'vendida') continue;
       e.status = state;
@@ -1703,6 +1706,122 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Leitura das pilhas (lista de transferências, não atribuídos, observação)
+  // ---------------------------------------------------------------------------
+
+  // O nome da função muda entre versões do Web App; procura pelo padrão.
+  const PILE_METHODS = {
+    transfer: { names: ['requestTransferItems', 'getTransferItems', 'requestTradePile'], re: /(transfer|trade).*(item|pile|list)/i, not: /market|search|move|send|clear|relist|list$/i },
+    unassigned: { names: ['requestUnassignedItems', 'getUnassignedItems', 'requestPurchasedItems'], re: /unassigned|purchased/i, not: /move|send|clear|discard/i },
+    watch: { names: ['requestWatchedItems', 'getWatchedItems', 'requestWatchList'], re: /watch/i, not: /un|remove|clear|add|target/i },
+  };
+
+  function methodNames(obj) {
+    const out = new Set();
+    let o = obj;
+    for (let depth = 0; o && o !== Object.prototype && depth < 5; depth++, o = Object.getPrototypeOf(o)) {
+      for (const k of Object.getOwnPropertyNames(o)) {
+        if (k === 'constructor') continue;
+        let v;
+        try { v = obj[k]; } catch (e) { v = null; }
+        if (typeof v === 'function') out.add(k);
+      }
+    }
+    return Array.from(out);
+  }
+
+  function findPileMethod(obj, which) {
+    const spec = PILE_METHODS[which];
+    if (!obj || !spec) return null;
+    const names = methodNames(obj);
+    const exact = spec.names.find((n) => names.includes(n));
+    if (exact) return exact;
+    return names.find((n) => spec.re.test(n) && !spec.not.test(n) && /^(request|get|load|fetch|refresh)/i.test(n)) || null;
+  }
+
+  function pileFromUrl(url) {
+    const u = String(url || '');
+    if (/\/tradepile(\?|$|\/)/i.test(u)) return 'transfer';
+    if (/\/purchased\/items(\?|$)/i.test(u)) return 'unassigned';
+    if (/\/watchlist(\?|$)/i.test(u)) return 'watch';
+    return null;
+  }
+
+  // Converte a resposta crua da EA (auctionInfo / itemData) no formato do bot.
+  function itemFromJson(entry, lookup) {
+    const ai = entry && entry.itemData ? entry : { itemData: entry };
+    const d = ai.itemData || {};
+    if (!(d.id > 0)) return null;
+    lookup = lookup || {};
+    const entity = lookup.entity ? lookup.entity(d.id) : null;
+    const type = String(d.itemType || '').toLowerCase();
+    return {
+      raw: entity || null,
+      id: d.id,
+      tradeId: ai.tradeId,
+      definitionId: d.resourceId || d.assetId || 0,
+      rating: d.rating || 0,
+      name: (entity && lookup.entityName && lookup.entityName(entity)) || (lookup.playerName && lookup.playerName(d.assetId)) ||
+        'Carta ' + (d.rating || '') + (d.assetId ? ' #' + d.assetId : ''),
+      kind: type === 'player' ? 'player' : type || null,
+      lastSalePrice: d.lastSalePrice || 0,
+      untradeable: !!d.untradeable,
+      marketAverage: d.marketAverage > 0 ? d.marketAverage : null,
+      minPrice: d.marketDataMinPrice || 0,
+      maxPrice: d.marketDataMaxPrice || 0,
+      tradeState: ai.tradeState || null,
+      currentBid: ai.currentBid || 0,
+      startingBid: ai.startingBid || 0,
+      buyNow: ai.buyNowPrice || 0,
+      bidState: ai.bidState || null,
+      tradeOwner: !!ai.tradeOwner,
+      expires: ai.expires,
+    };
+  }
+
+  function itemsFromPileJson(json, lookup) {
+    const list = (json && (json.auctionInfo || json.itemData || json.items)) || [];
+    return list.map((x) => itemFromJson(x, lookup)).filter(Boolean);
+  }
+
+  // Lê as respostas que o próprio Web App recebe (XHR e fetch) quando abre a
+  // lista de transferências, não atribuídos ou observação. Não faz pedidos.
+  function installPileCapture(win, onPile) {
+    if (win.__fcabPileCapture) return;
+    win.__fcabPileCapture = true;
+    const handle = (url, text) => {
+      const which = pileFromUrl(url);
+      if (!which || !text) return;
+      try { onPile(which, JSON.parse(text)); } catch (e) { /* não era JSON */ }
+    };
+    const XHR = win.XMLHttpRequest && win.XMLHttpRequest.prototype;
+    if (XHR && XHR.open) {
+      const open = XHR.open;
+      XHR.open = function (method, url) {
+        try {
+          if (pileFromUrl(url)) {
+            this.addEventListener('load', () => {
+              try { if (this.status >= 200 && this.status < 300) handle(url, this.responseText); } catch (e) { /* ignora */ }
+            });
+          }
+        } catch (e) { /* ignora */ }
+        return open.apply(this, arguments);
+      };
+    }
+    if (typeof win.fetch === 'function') {
+      const f = win.fetch;
+      win.fetch = function (input) {
+        const url = typeof input === 'string' ? input : input && input.url;
+        const p = f.apply(this, arguments);
+        if (pileFromUrl(url)) {
+          p.then((r) => { if (r && r.ok) r.clone().text().then((t) => handle(url, t)).catch(() => {}); }).catch(() => {});
+        }
+        return p;
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Módulos de lances e de venda
   // ---------------------------------------------------------------------------
 
@@ -1805,9 +1924,14 @@
     const stopped = o.isStopped || (() => false);
     const res = { listed: 0, simulated: 0, failed: 0, stopReason: '' };
     for (const order of orders) {
-      const items = order.group.items.slice(0, order.qty);
+      const items = order.group.items.slice().sort((a, b) => (b.raw ? 1 : 0) - (a.raw ? 1 : 0)).slice(0, order.qty);
       for (const it of items) {
         if (stopped()) { res.stopReason = 'parado por você'; return res; }
+        if (!it.raw) {
+          res.failed++;
+          log('Não consegui anunciar ' + describeItem(it) + ': abra a lista de transferências no Web App (role até ver a carta) e tente de novo.', 'warn');
+          continue;
+        }
         if (s.dryRun) {
           res.simulated++;
           log('SIMULAÇÃO: anunciaria ' + describeItem(it) + ' por ' + fmt(order.bin) + ' (lance inicial ' + fmt(order.start) + ').', 'success');
@@ -1881,15 +2005,31 @@
     let internalCall = false;
     const G = (name) => lookupGlobal(win, name);
 
-    function observe(observable) {
+    // Espera a resposta do Web App, com prazo: nada fica esperando para sempre.
+    function observe(observable, timeoutMs) {
       return new Promise((resolve) => {
         const scope = {};
-        observable.observe(scope, function (sender, response) {
-          try {
-            if (sender && typeof sender.unobserve === 'function') sender.unobserve(scope);
-          } catch (e) { /* ignora */ }
-          resolve(response || {});
-        });
+        let done = false;
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          resolve({ success: false, status: 'sem resposta', timeout: true });
+        }, timeoutMs || 20000);
+        try {
+          observable.observe(scope, function (sender, response) {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            try {
+              if (sender && typeof sender.unobserve === 'function') sender.unobserve(scope);
+            } catch (e) { /* ignora */ }
+            resolve(response || {});
+          });
+        } catch (e) {
+          done = true;
+          clearTimeout(timer);
+          resolve({ success: false, status: 'erro ' + e.message });
+        }
       });
     }
 
@@ -2068,13 +2208,27 @@
       },
 
       // Pilhas da conta: lista de transferências, não atribuídos e lances.
-      async pile(which) {
-        const svc = G('services').Item;
-        const fn = { transfer: 'requestTransferItems', unassigned: 'requestUnassignedItems', watch: 'requestWatchedItems' }[which];
-        if (!fn || typeof svc[fn] !== 'function') return { success: false, status: 0, items: [], missing: true };
-        const response = await observe(svc[fn]());
-        const items = (response.data && response.data.items) || [];
-        return Object.assign(result(response), { items: items.map(toItem) });
+      async pile(which, lookup) {
+        const svc = G('services') && G('services').Item;
+        const fn = findPileMethod(svc, which);
+        if (!fn) return { success: false, status: 0, items: [], missing: true };
+        let observable;
+        try { observable = svc[fn](); } catch (e) { return { success: false, status: 'erro ' + e.message, items: [] }; }
+        if (!observable || typeof observable.observe !== 'function') return { success: false, status: 'resposta inesperada', items: [], method: fn };
+        const response = await observe(observable, 15000);
+        const d = response.data || {};
+        const list = d.items || d.auctionInfo || d.itemData || response.items || [];
+        const items = list.map((x) => (x && x.itemData ? itemFromJson(x, lookup) : toItem(x))).filter(Boolean);
+        const ok = !!response.success || (!response.timeout && list.length > 0);
+        return Object.assign(result(response), { success: ok, items, method: fn, timeout: !!response.timeout });
+      },
+
+      // Nomes das funções do Web App ligadas às pilhas (para o Diagnóstico).
+      pileMethods() {
+        const svc = G('services') && G('services').Item;
+        if (!svc) return 'services.Item não encontrado';
+        return ['transfer', 'unassigned', 'watch'].map((w) => w + ': ' + (findPileMethod(svc, w) || '—')).join(', ') +
+          ' | outras: ' + methodNames(svc).filter((n) => /transfer|trade|unassigned|purchas|watch|pile|relist/i.test(n)).slice(0, 15).join(', ');
       },
 
       async moveToTransferList(raw) {
@@ -2793,6 +2947,34 @@
       }).join('') || '<p class="hint">Nada registrado ainda.</p>';
     }
 
+    // Lê uma pilha: primeiro pela função do Web App; se não der, usa o que o
+    // Web App carregou quando você abriu a tela. Liga cada carta ao objeto
+    // que o Web App desenhou (necessário para anunciar).
+    async function readPile(which) {
+      const r = await adapter.pile(which, deps.lookup);
+      const cap = deps.piles && deps.piles[which];
+      let items = r.success ? r.items : cap ? cap.items : null;
+      let source = r.success ? 'web app' : cap ? 'captura' : null;
+      if (!items) {
+        const why = r.missing ? 'função não encontrada' : r.timeout ? 'o Web App não respondeu' : 'erro ' + r.status;
+        return { ok: false, why };
+      }
+      items = items.map((it) => {
+        if (it.raw || !deps.entities) return it;
+        const entity = deps.entities.get(it.id) || null;
+        if (!entity) return it;
+        const better = deps.lookup && deps.lookup.entityName ? deps.lookup.entityName(entity) : null;
+        return Object.assign({}, it, { raw: entity, name: better && !/^\d+$/.test(better) ? better : it.name });
+      });
+      return { ok: true, items, source, at: cap && source === 'captura' ? cap.at : Date.now() };
+    }
+
+    const PILE_NAMES = { transfer: 'Lista de transferências', unassigned: 'Não atribuídos', watch: 'Lista de observação' };
+
+    function pileHelp(which) {
+      return 'Abra no Web App: <b>Transferências → ' + PILE_NAMES[which] + '</b>, espere carregar e volte aqui.';
+    }
+
     function applySync(items, quiet) {
       const ch = syncLedger(ledger(), items);
       ch.sold.forEach((e) => {
@@ -2809,11 +2991,15 @@
       modBusy = 'lucro';
       try {
         for (const which of ['transfer', 'unassigned']) {
-          const r = await adapter.pile(which);
-          if (r.success) applySync(r.items);
-          else log('Não consegui ler ' + (which === 'transfer' ? 'a lista de transferências' : 'Não atribuídos') +
-            (r.missing ? ' (função não encontrada no Web App)' : ' (erro ' + r.status + ')') + '.', 'warn');
+          const r = await readPile(which);
+          if (r.ok) {
+            applySync(r.items);
+            if (r.source === 'captura') log(PILE_NAMES[which] + ': usei a que o Web App carregou às ' + new Date(r.at).toLocaleTimeString('pt-BR') + '.', 'warn');
+          } else {
+            log('Não consegui ler ' + PILE_NAMES[which] + ' (' + r.why + '). Abra essa tela no Web App e toque em Atualizar de novo.', 'warn');
+          }
         }
+        renderProfit();
       } finally {
         modBusy = '';
       }
@@ -2898,20 +3084,26 @@
       modBusy = 'venda';
       el('sellGroups').innerHTML = '<p class="hint">Carregando…</p>';
       try {
-        const piles = ['transfer'].concat(el('sellUnassigned').checked ? ['unassigned'] : []);
+        const which = ['transfer'].concat(el('sellUnassigned').checked ? ['unassigned'] : []);
         let items = [];
-        for (const which of piles) {
-          const r = await adapter.pile(which);
-          if (!r.success) {
-            el('sellGroups').innerHTML = '<p class="hint">Não consegui ler as cartas' +
-              (r.missing ? ' (função não encontrada no Web App)' : ' (erro ' + r.status + ')') + '.</p>';
+        const notes = [];
+        for (const w of which) {
+          const r = await readPile(w);
+          if (!r.ok) {
+            el('sellGroups').innerHTML = '<p class="hint">Não consegui ler ' + PILE_NAMES[w] + ' (' + escapeHtml(r.why) + '). ' + pileHelp(w) + '</p>';
             return;
           }
+          if (r.source === 'captura') notes.push(PILE_NAMES[w] + ' carregada pelo Web App às ' + new Date(r.at).toLocaleTimeString('pt-BR'));
           applySync(r.items, true);
           items = items.concat(r.items);
         }
         sellGroups = groupSellable(items, ledger());
         renderSellGroups();
+        const missing = sellGroups.reduce((n, g) => n + g.items.filter((it) => !it.raw).length, 0);
+        if (notes.length || missing) {
+          el('sellGroups').insertAdjacentHTML('afterbegin', '<p class="hint">' + escapeHtml(notes.join(' · ')) +
+            (missing ? (notes.length ? ' · ' : '') + missing + ' carta(s) ainda não apareceram na tela: para anunciá-las, abra a lista de transferências no Web App e role até vê-las.' : '') + '</p>');
+        }
       } finally {
         modBusy = '';
       }
@@ -2932,7 +3124,8 @@
         const ref = [g.marketAverage ? 'Média EA ' + fmt(g.marketAverage) : '', g.futbin ? 'FUTBIN ' + fmt(g.futbin) : '',
           g.avgCost ? 'pago em média ' + fmt(g.avgCost) : 'preço pago desconhecido'].filter(Boolean).join(' · ');
         return '<div class="card sg" data-key="' + escapeHtml(g.key) + '">' +
-          '<div class="sg-top"><b>' + escapeHtml(g.name + (g.rating ? ' ' + g.rating : '')) + '</b><span class="sg-count">Você tem ' + g.count + '</span></div>' +
+          '<div class="sg-top"><b>' + escapeHtml(g.name + (g.rating ? ' ' + g.rating : '')) + '</b><span class="sg-count">Você tem ' + g.count +
+          (g.items.some((it) => !it.raw) ? ' (' + g.items.filter((it) => it.raw).length + ' prontas)' : '') + '</span></div>' +
           '<p class="hint">' + escapeHtml(ref) + (g.minPrice ? ' · EA permite ' + fmt(g.minPrice) + '–' + fmt(g.maxPrice) : '') + '</p>' +
           '<div class="grid3">' +
           '<div><label>Quantas</label><input data-s="qty" inputmode="numeric" value="0"></div>' +
@@ -3154,6 +3347,9 @@
             ['ponte FUTBIN (segundo script)', futbin.bridgeReady()],
             ['preço nas cartas: ' + (hooks.length ? hooks.join(', ') : 'nenhuma função de desenho encontrada'), hooks.length > 0],
             ['linha: ' + (deps.overlay.rowSample() || 'nenhuma lista vista ainda').slice(0, 400), true],
+            ['funções das pilhas: ' + adapter.pileMethods(), true],
+            ['pilhas lidas do Web App: ' + (['transfer', 'unassigned', 'watch'].filter((w) => deps.piles && deps.piles[w])
+              .map((w) => PILE_NAMES[w] + ' (' + deps.piles[w].items.length + ')').join(', ') || 'nenhuma ainda (abra a lista de transferências)'), true],
             ['filtro PlayStyle+ do Web App: ' + (app.state.settings.psPlusField ? 'aprendido (' + app.state.settings.psPlusField.key + ')' : 'ainda não aprendido'), !!app.state.settings.psPlusField],
             ['campos de preço da EA: ' + (deps.overlay.eaSample() || 'nenhuma carta vista ainda'), /market/i.test(deps.overlay.eaSample())],
             (() => {
@@ -3369,6 +3565,17 @@
   function boot(win) {
     const store = createStore(safeStorage(win));
     const app = { state: store.load(), captured: null };
+    // Cartas que o Web App já desenhou na tela (para poder anunciá-las) e as
+    // pilhas que ele já carregou (lista de transferências etc.).
+    const entities = new Map();
+    const piles = {};
+    let ui = null;
+    let lookup = null;
+    installPileCapture(win, (which, json) => {
+      const items = itemsFromPileJson(json, lookup || {});
+      piles[which] = { at: Date.now(), items };
+      if (ui && (which === 'transfer' || which === 'unassigned')) ui.syncFromTransferList(items);
+    });
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
     const futbinRequest = withCircuitBreaker(bridge);
@@ -3376,8 +3583,7 @@
     const prices = createPriceService(futbinRequest, futbin);
     const overlay = createPriceOverlay(win, prices, () => app.state.settings, (msg) => {
       if (ui) ui.log('FUTBIN: ' + msg, 'error');
-    });
-    let ui = null;
+    }, entities);
     const engine = new Autobuyer({
       adapter,
       getState: () => app.state,
@@ -3409,7 +3615,12 @@
     const names = createNameService(() => adapter.localize());
     const playersDb = createPlayersDb(adapter, win);
     names.player = (id) => playersDb.name(id);
-    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay, names, players: playersDb });
+    lookup = {
+      entity: (id) => entities.get(id) || null,
+      entityName: (e) => itemNameOf(e),
+      playerName: (assetId) => playersDb.name(assetId),
+    };
+    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay, names, players: playersDb, piles, entities, lookup });
     ui.log('Painel carregado. Aguardando o Web App...');
 
     const timer = setInterval(() => {
@@ -3440,6 +3651,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, runBulkBids, collectWonBids, runBulkSell,
+    findPileMethod, pileFromUrl, itemFromJson, itemsFromPileJson, installPileCapture,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

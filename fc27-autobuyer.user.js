@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      0.8.1
+// @version      0.9.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '0.8.1';
+  const SCRIPT_VERSION = '0.9.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -358,6 +358,17 @@
       (target && (target.minRating > 0 || target.maxRating > 0 || target.psPlus || (target.playStyles || []).length > 0)));
   }
 
+  // Quantidade por alvo: maxCount = quantas cartas comprar (0 = sem limite),
+  // bought = quantas já foram compradas de verdade.
+  function targetRemaining(t) {
+    if (!(t.maxCount > 0)) return Infinity;
+    return Math.max(0, t.maxCount - (t.bought || 0));
+  }
+
+  function targetDone(t) {
+    return targetRemaining(t) === 0;
+  }
+
   // Motivo para não aceitar o alvo, ou null se está tudo certo.
   function targetProblem(t) {
     if (!t || !KINDS.some((k) => k[0] === t.kind)) return 'escolha o tipo do alvo (jogador ou consumível)';
@@ -455,6 +466,11 @@
     (t.playStyles || []).forEach((p) => parts.push(playStyleName(p.id, p.plus)));
     if (t.minRating > 0 || t.maxRating > 0) parts.push('Nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?'));
     return parts;
+  }
+
+  function countLabel(t) {
+    if (!(t.maxCount > 0)) return (t.bought || 0) + ' comprado(s) · sem limite';
+    return (t.bought || 0) + ' de ' + t.maxCount + ' comprado(s)';
   }
 
   function describeTarget(t, names) {
@@ -1280,6 +1296,8 @@
       this.onChange = opts.onChange || function () {};
       this.onPurchase = opts.onPurchase || function () {};
       this.onSearchResults = opts.onSearchResults || function () {};
+      this.onTargetsChanged = opts.onTargetsChanged || function () {};
+      this.simCount = new Map();
       this.random = opts.random || Math.random;
       this.running = false;
       this.status = 'parado';
@@ -1301,6 +1319,8 @@
       this.seen.clear();
       this.skipped = new Set();
       this.warned = new Set();
+      this.simCount = new Map();
+      this.completedNow = 0;
       this.consecutiveErrors = 0;
       this.stopReason = '';
       this.setStatus('rodando');
@@ -1368,7 +1388,8 @@
       if (limit) return this.stop(limit);
 
       const active = state.targets.filter((t) => {
-        if (!t.enabled) return false;
+        if (!t.enabled || targetDone(t)) return false;
+        if (s.dryRun && (this.simCount.get(t.id) || 0) >= targetRemaining(t)) return false;
         const problem = targetProblem(t);
         if (problem && !this.warned.has(t.id)) {
           this.warned.add(t.id);
@@ -1376,7 +1397,11 @@
         }
         return !problem;
       });
-      if (!active.length) return this.stop('nenhum alvo válido e ativo');
+      if (!active.length) {
+        const reached = this.completedNow > 0 || state.targets.some((t) => t.enabled && t.maxCount > 0 &&
+          (targetDone(t) || (s.dryRun && (this.simCount.get(t.id) || 0) >= targetRemaining(t))));
+        return this.stop(reached ? 'quantidade de compras dos alvos atingida' : 'nenhum alvo válido e ativo');
+      }
       const target = active[this.targetIndex++ % active.length];
 
       const res = await this.adapter.search(buildCriteria(target, this.busterIndex++));
@@ -1404,8 +1429,14 @@
 
       if (s.dryRun) {
         this.stats.simulated++;
+        const n = (this.simCount.get(target.id) || 0) + 1;
+        this.simCount.set(target.id, n);
+        const of = target.maxCount > 0 ? ' [' + ((target.bought || 0) + n) + ' de ' + target.maxCount + ']' : '';
         this.log('SIMULAÇÃO: compraria ' + describeItem(item) + ' por ' + fmt(item.buyNow) +
-          ' (' + target.name + '). Nada foi comprado.', 'success');
+          ' (' + target.name + ')' + of + '. Nada foi comprado.', 'success');
+        if (target.maxCount > 0 && n >= targetRemaining(target)) {
+          this.log('SIMULAÇÃO: alvo "' + target.name + '" chegaria à quantidade pedida; parei de procurar por ele.', 'warn');
+        }
         this.onChange();
         return;
       }
@@ -1434,6 +1465,13 @@
         listed: false,
       };
       this.log('Comprei ' + item.name + ' por ' + fmt(item.buyNow) + '!', 'success');
+      target.bought = (target.bought || 0) + 1;
+      if (targetDone(target)) {
+        target.enabled = false;
+        this.completedNow++;
+        this.log('Alvo "' + target.name + '" concluído: ' + countLabel(target) + '. Desliguei o alvo.', 'success');
+      }
+      this.onTargetsChanged();
 
       if (purchase.sellPrice) {
         await this.wait(randomBetween(800, 1800, this.random));
@@ -1787,6 +1825,9 @@
 #fcab-panel .pill-player{background:#12344d;color:#6fc3ff}
 #fcab-panel .pill-chem{background:#2e2048;color:#c7a6ff}
 #fcab-panel .pill-none{background:#4a1d1d;color:#ff8f8f}
+#fcab-panel .pill-done{background:#1d4d33;color:#7ff0a6}
+#fcab-panel .count b{font-size:13px}
+#fcab-panel .count button{padding:3px 8px;font-size:12px;margin-left:4px}
 #fcab-panel .tags{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0 4px}
 #fcab-panel .tag{background:#262a31;color:#dfe3ea;border-radius:6px;padding:2px 7px;font-size:12px}
 #fcab-panel .sw{position:relative;display:inline-block;width:40px;height:24px;flex:none}
@@ -1908,6 +1949,9 @@
               <div><label>Compra até</label><input data-el="newMax" inputmode="numeric" placeholder="Ex.: 5000"></div>
               <div><label>Revende por (opcional)</label><input data-el="newSell" inputmode="numeric" placeholder="vazio = não revende"></div>
             </div>
+            <label>Quantas cartas comprar</label>
+            <input data-el="newCount" inputmode="numeric" placeholder="vazio = sem limite">
+            <p class="hint">Quando chegar nesse número, o alvo é desligado e o bot para de procurar essa carta.</p>
           </div>
           <button class="go full" data-act="add">Adicionar alvo</button>
         </div>
@@ -1981,6 +2025,7 @@
         const problem = t.needsReview
           ? 'Alvo criado numa versão antiga: confira o tipo e os filtros em ✎ e salve para poder ativar.'
           : targetProblem(t) ? 'Não pode rodar: ' + targetProblem(t) + '.' : '';
+        const done = targetDone(t);
         const kindPill = t.kind === 'chemstyle' ? '<span class="pill pill-chem">Consumível</span>'
           : t.kind === 'player' ? '<span class="pill pill-player">Jogador</span>'
           : '<span class="pill pill-none">Sem tipo</span>';
@@ -1989,7 +2034,7 @@
         <div class="tg card${t.enabled ? ' on' : ''}" data-id="${escapeHtml(t.id)}">
           <div class="tg-top">
             <label class="sw"><input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''} ${problem ? 'disabled' : ''}><span></span></label>
-            <div class="tg-title"><div class="name">${escapeHtml(t.name)}</div>${kindPill}</div>
+            <div class="tg-title"><div class="name">${escapeHtml(t.name)}</div>${kindPill}${done ? ' <span class="pill pill-done">Concluído</span>' : ''}</div>
             <button class="icon" data-f="editFilters" title="Editar filtros">✎</button>
             <button class="icon" data-f="remove" title="Excluir">🗑</button>
           </div>
@@ -2000,6 +2045,8 @@
           <div class="grid">
             <div><label>Compra até</label><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"></div>
             <div><label>Revende por</label><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"></div>
+            <div><label>Quantidade</label><input data-f="maxCount" inputmode="numeric" placeholder="sem limite" value="${t.maxCount > 0 ? t.maxCount : ''}"></div>
+            <div class="count"><label>Progresso</label><div><b>${escapeHtml(countLabel(t))}</b>${t.bought ? ' <button data-f="resetCount">Zerar</button>' : ''}</div></div>
           </div>
         </div>`;
       }).join('');
@@ -2337,7 +2384,9 @@
         app.captured && app.captured.maskedDefId === edited.criteria.maskedDefId;
       const card = edited.kind === 'player' && sameCard ? app.capturedCard : null;
       const summary = describeTarget(draft, names);
+      const count = parseCoins(el('newCount').value);
       if (!win.confirm('Confirme o alvo:\n\n' + summary + '\nCompra até ' + fmt(maxBuy) +
+        '\nQuantidade: ' + (count > 0 ? count + ' carta(s)' : 'sem limite') +
         (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       app.state.targets.push({
         id: Date.now().toString(36),
@@ -2346,6 +2395,8 @@
         criteria: edited.criteria,
         labels: edited.labels,
         playStyles: edited.playStyles,
+        maxCount: parseCoins(el('newCount').value),
+        bought: 0,
         psPlus: edited.psPlus,
         psPlusServer: edited.psPlusServer,
         minRating: edited.minRating,
@@ -2357,7 +2408,7 @@
         futbin: card && app.capturedFutbin && app.capturedCard === card ? app.capturedFutbin : null,
       });
       save();
-      ['newName', 'newMax', 'newSell'].forEach((k) => { el(k).value = ''; });
+      ['newName', 'newMax', 'newSell', 'newCount'].forEach((k) => { el(k).value = ''; });
       app.captured = null;
       app.capturedCard = null;
       app.capturedLabels = {};
@@ -2484,6 +2535,13 @@
         log('Preços de ' + tgt.name + ' ajustados pelo FUTBIN.', 'success');
         return;
       }
+      if (tgt && e.target.dataset.f === 'resetCount') {
+        if (!win.confirm('Zerar a contagem de compras de "' + tgt.name + '"?')) return;
+        tgt.bought = 0;
+        save();
+        renderTargets();
+        return;
+      }
       if (tg && e.target.dataset.f === 'remove') {
         if (!win.confirm('Remover este alvo?')) return;
         app.state.targets = app.state.targets.filter((t) => t.id !== tg.dataset.id);
@@ -2538,7 +2596,9 @@
       const target = app.state.targets.find((t) => t.id === tg.dataset.id);
       if (!target) return;
       if (f === 'enabled') {
-        const problem = target.needsReview ? 'revise o alvo em ✎ Filtros e salve' : targetProblem(target);
+        const problem = target.needsReview ? 'revise o alvo em ✎ Filtros e salve'
+          : targetDone(target) ? 'este alvo já comprou a quantidade pedida (' + countLabel(target) + '); aumente a quantidade ou toque em Zerar'
+          : targetProblem(target);
         if (e.target.checked && problem) {
           e.target.checked = false;
           return win.alert('Não dá para ativar: ' + problem + '.');
@@ -2547,6 +2607,12 @@
       }
       if (f === 'maxBuy') target.maxBuy = parseCoins(e.target.value) || target.maxBuy;
       if (f === 'sellPrice') target.sellPrice = parseCoins(e.target.value);
+      if (f === 'maxCount') {
+        target.maxCount = parseCoins(e.target.value);
+        save();
+        renderTargets();
+        return;
+      }
       save();
     });
 
@@ -2559,6 +2625,9 @@
     return {
       log,
       onCaptured,
+      refreshTargets() {
+        renderTargets();
+      },
       refreshFilters() {
         renderNewFilters();
         renderTargets();
@@ -2613,6 +2682,10 @@
       },
       // Alvos criados por ID ainda não sabem qual é a carta; a primeira busca
       // do bot traz o nome, e aí dá para consultar o FUTBIN.
+      onTargetsChanged: () => {
+        store.save(app.state);
+        if (ui) ui.refreshTargets();
+      },
       onSearchResults: (target, items) => {
         const c = target.criteria || {};
         if (target.kind !== 'player' || target.card || !(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length))) return;
@@ -2654,6 +2727,7 @@
     PLAYSTYLES, playStyleName, readPlayStyles, playStyleMismatch, targetParts, createNameService,
     searchByName, parsePlayersDb, searchPlayers, validName,
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
+    targetRemaining, targetDone, countLabel,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

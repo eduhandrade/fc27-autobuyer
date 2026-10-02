@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.1.1
+// @version      1.2.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.1.1';
+  const SCRIPT_VERSION = '1.2.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1062,7 +1062,10 @@
     return view.__root || view._root || null;
   }
 
-  function createPriceOverlay(win, prices, getSettings, onError, registry) {
+  function createPriceOverlay(win, prices, getSettings, onError, registry, market) {
+    // Cartas desenhadas na tela (para o botão de preço atual).
+    const shown = new Map();
+
     // Título da tela atual do Web App (ex.: "Transfer List"), para saber em
     // qual lista cada carta apareceu.
     function screenTitle() {
@@ -1167,28 +1170,38 @@
       const root = rootFromView(view);
       if (!root || !root.querySelector || !isPlayerItem(item)) return;
       const card = { name: itemNameOf(item), definitionId: item.definitionId, rating: item.rating };
+      shown.set(root, { view, args, kind, card });
+      const now = market && market.get(card.definitionId);
+      if (settings.priceSource !== 'futbin' && !now) {
+        const old = badges.get(root);
+        if (old) { old.remove(); badges.delete(root); }
+        return;
+      }
       const badge = badgeFor(root, kind, card.name);
       const tag = card.definitionId + ':' + settings.platform;
       badge.dataset.tag = tag;
       if (!eaSample) eaSample = priceFieldsOf(item) || '(nenhum campo de preço no item)';
       const bin = item._auction && item._auction.buyNowPrice;
-      const avg = eaMarketAverage(item);
       const setPrice = (label, price, title) => {
-        badge.textContent = label + ' ' + formatShort(price);
+        badge.textContent = label + ' ' + (price < 100000 ? fmt(price) : formatShort(price));
         badge.classList.toggle('fcab-good', bin > 0 && bin < price);
         badge.title = title;
       };
+      // Preço atual do mercado (botão 💲): vale mais que qualquer outro.
+      if (now) {
+        badge.classList.remove('fcab-good');
+        if (now.state === 'checking') { badge.textContent = 'Agora …'; badge.title = 'Consultando o mercado'; return; }
+        if (!(now.price > 0)) { badge.textContent = 'Agora: sem anúncio'; badge.title = 'Nenhum anúncio de compre já encontrado'; return; }
+        counters.priced++;
+        const mins = Math.max(0, Math.round((Date.now() - now.at) / 60000));
+        return setPrice('Agora', now.price, 'Menor compre já no mercado da EA (há ' + mins + ' min): ' + fmt(now.price));
+      }
       const showEa = (why) => {
-        if (avg) {
-          counters.priced++;
-          setPrice('Média EA', avg, 'Média de mercado da EA: ' + fmt(avg) + (why ? ' (FUTBIN: ' + why + ')' : ''));
-        } else {
-          badge.classList.remove('fcab-good');
-          badge.textContent = why ? 'FUTBIN ? ' + errorCode(why) : 'Média EA —';
-          badge.title = why || 'A EA não informou média de mercado para esta carta';
-        }
+        badge.classList.remove('fcab-good');
+        badge.textContent = 'FUTBIN ? ' + errorCode(why);
+        badge.title = why || '';
       };
-      if (settings.priceSource !== 'futbin' || prices.blocked()) return showEa(prices.blocked() ? 'bloqueado' : '');
+      if (prices.blocked()) return showEa('bloqueado');
       badge.classList.remove('fcab-good');
       badge.textContent = 'FUTBIN …';
       prices.get(card, settings.platform).then((price) => {
@@ -1223,6 +1236,23 @@
       },
       installed: () => installed.map((h) => h[0] + '.' + h[1]),
       rowSample: () => rowSample,
+      // Cartas na tela agora (sem repetir a mesma carta).
+      visibleCards() {
+        const out = new Map();
+        shown.forEach((v, root) => {
+          if (!root.isConnected) { shown.delete(root); return; }
+          if (!out.has(v.card.definitionId)) out.set(v.card.definitionId, v.card);
+        });
+        return Array.from(out.values());
+      },
+      // Redesenha as etiquetas de uma carta (depois de consultar o preço).
+      refresh(definitionId) {
+        shown.forEach((v, root) => {
+          if (v.card.definitionId === definitionId && root.isConnected) {
+            try { show(v.view, v.args, v.kind); } catch (e) { /* ignora */ }
+          }
+        });
+      },
       counters: () => counters,
       eaSample: () => eaSample,
     };
@@ -2033,6 +2063,65 @@
     return res;
   }
 
+  // Preços atuais consultados no mercado, guardados por 10 minutos.
+  function createMarketCache(opts) {
+    opts = opts || {};
+    const now = opts.now || Date.now;
+    const maxAge = opts.maxAge || 10 * 60 * 1000;
+    const map = new Map();
+    return {
+      get(defId) {
+        const v = map.get(defId);
+        if (!v) return null;
+        if (v.state !== 'checking' && now() - v.at > maxAge) { map.delete(defId); return null; }
+        return v;
+      },
+      set(defId, v) { map.set(defId, Object.assign({ at: now() }, v)); },
+      delete(defId) { map.delete(defId); },
+      size: () => map.size,
+    };
+  }
+
+  // Menor preço de "compre já" de uma carta no mercado da EA, agora.
+  // A busca devolve até ~20 anúncios (não ordenados por preço); então busca de
+  // novo com "compre já" máximo logo abaixo do menor achado, até não sobrar
+  // nenhum mais barato ou a página vir incompleta (aí já vimos todos).
+  async function lowestBin(o) {
+    const { adapter, card } = o;
+    const maxRounds = o.maxRounds || 5;
+    const wait = o.wait || sleepMs;
+    const random = o.random || Math.random;
+    const pageSize = o.pageSize || 20;
+    let max = 0;
+    let best = null;
+    let searches = 0;
+    for (let round = 0; round < maxRounds; round++) {
+      const criteria = { type: 'player', maskedDefId: baseDefId(card.definitionId) };
+      if (max) criteria.maxBuy = max;
+      criteria.minBuy = round % 2 ? 0 : 150 + 50 * (searches % 3); // varia a busca para não vir do cache
+      if (criteria.minBuy && max && criteria.minBuy >= max) criteria.minBuy = 0;
+      const res = await adapter.search(criteria);
+      searches++;
+      if (!res.success) {
+        const kind = classifyStatus(res.status);
+        const err = new Error(FATAL_MESSAGES[kind] || 'erro ' + res.status + ' na busca');
+        err.fatal = !!FATAL_MESSAGES[kind];
+        err.stop = STOP_REASONS[kind];
+        throw err;
+      }
+      const bins = res.items.filter((it) => it.definitionId === card.definitionId && it.buyNow > 0).map((it) => it.buyNow);
+      if (!bins.length) break;
+      const m = Math.min.apply(null, bins);
+      best = best == null ? m : Math.min(best, m);
+      if (res.items.length < pageSize) break;
+      const next = prevPrice(best);
+      if (next >= best || next < 200) break;
+      max = next;
+      await wait(randomBetween(700, 1400, random));
+    }
+    return { price: best, searches };
+  }
+
   // Confere a lista de observação: cartas ganhas vão para a lista de
   // transferências e entram no registro com o valor do lance.
   async function collectWonBids(o) {
@@ -2487,7 +2576,7 @@
     platform: 'ps',
     futbinMargin: 15,
     showCardPrices: true,
-    priceSource: 'ea',
+    priceSource: 'market',
     dryRun: true,
   };
 
@@ -2538,6 +2627,8 @@
 .fcab-fb-inline{position:static;display:inline-block;margin:4px 0 4px 8px;vertical-align:middle}
 .fcab-fb-corner{position:absolute;top:8px;right:44px}
 .fcab-fb.fcab-good{background:#0f3d22;color:#4cd97b;border-color:#4cd97b}
+#fcab-price{position:fixed;right:14px;bottom:154px;z-index:2147483646;min-width:44px;height:44px;border-radius:22px;border:0;padding:0 10px;background:#1f6feb;color:#fff;font:700 16px -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+#fcab-price.busy{background:#9a6700;font-size:13px}
 #fcab-toggle{position:fixed;right:12px;bottom:96px;z-index:2147483646;width:48px;height:48px;border-radius:50%;border:0;background:#1db954;color:#fff;font-size:22px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #fcab-panel{position:fixed;right:8px;bottom:8px;z-index:2147483647;width:min(380px,calc(100vw - 16px));max-height:78vh;overflow:auto;background:#15171c;color:#e8e8e8;border:1px solid #333;border-radius:12px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
 #fcab-panel[hidden]{display:none}
@@ -2678,6 +2769,11 @@
     toggle.textContent = '⚡';
     toggle.title = 'FC27 Autobuyer';
 
+    const priceBtn = doc.createElement('button');
+    priceBtn.id = 'fcab-price';
+    priceBtn.textContent = '💲';
+    priceBtn.title = 'Preço atual no mercado das cartas da tela';
+
     const panel = doc.createElement('div');
     panel.id = 'fcab-panel';
     panel.hidden = true;
@@ -2785,6 +2881,7 @@
     `;
 
     doc.body.appendChild(toggle);
+    doc.body.appendChild(priceBtn);
     doc.body.appendChild(panel);
 
     const el = (name) => panel.querySelector('[data-el="' + name + '"]');
@@ -3117,8 +3214,8 @@
         '<label><input type="checkbox" data-setting="showCardPrices"' + (app.state.settings.showCardPrices ? ' checked' : '') +
         '> Mostrar preço em cada carta</label>' +
         '<label>Preço mostrado nas cartas</label><select data-setting="priceSource">' +
-        '<option value="ea"' + (app.state.settings.priceSource !== 'futbin' ? ' selected' : '') + '>Média de mercado da EA (recomendado)</option>' +
-        '<option value="futbin"' + (app.state.settings.priceSource === 'futbin' ? ' selected' : '') + '>FUTBIN (pode ser bloqueado)</option></select>' +
+        '<option value="market"' + (app.state.settings.priceSource !== 'futbin' ? ' selected' : '') + '>Preço atual do mercado (botão 💲)</option>' +
+        '<option value="futbin"' + (app.state.settings.priceSource === 'futbin' ? ' selected' : '') + '>FUTBIN (costuma ser bloqueado)</option></select>' +
         SETTING_FIELDS.map(([key, label]) =>
         '<label>' + label + '</label><input data-setting="' + key + '" inputmode="decimal" value="' + app.state.settings[key] + '">'
       ).join('');
@@ -3139,6 +3236,56 @@
       if (!app.state.ledger) app.state.ledger = {};
       return app.state.ledger;
     }
+
+    // Botão 💲: consulta, uma a uma, o menor "compre já" das cartas na tela
+    // (ou das informadas) e vai mostrando o preço em cada carta.
+    const PRICE_CHECK_LIMIT = 12;
+    async function checkPrices(cards) {
+      if (engine.running || modBusy) { win.alert('Pare o bot/módulo antes de consultar preços.'); return; }
+      const market = deps.market;
+      const list = (cards || deps.overlay.visibleCards()).filter((c) => c && c.definitionId > 0 && !(market.get(c.definitionId) || {}).price);
+      if (!list.length) {
+        win.alert(cards ? 'Preço já consultado há pouco.' : 'Nenhuma carta de jogador na tela (ou os preços já foram consultados há pouco).');
+        return;
+      }
+      const todo = list.slice(0, PRICE_CHECK_LIMIT);
+      modBusy = 'preços';
+      modStop = false;
+      priceBtn.classList.add('busy');
+      log('Consultando o preço atual de ' + todo.length + ' carta(s)' + (list.length > todo.length ? ' (máximo ' + PRICE_CHECK_LIMIT + ' por vez)' : '') + '…');
+      let done = 0;
+      try {
+        for (const card of todo) {
+          if (modStop) break;
+          priceBtn.textContent = (done + 1) + '/' + todo.length;
+          market.set(card.definitionId, { state: 'checking' });
+          deps.overlay.refresh(card.definitionId);
+          try {
+            const r = await lowestBin({ adapter, card });
+            market.set(card.definitionId, { price: r.price || 0 });
+            log((card.name || 'Carta') + ' ' + (card.rating || '') + ': ' + (r.price ? 'menor compre já agora ' + fmt(r.price) : 'nenhum anúncio de compre já') +
+              ' (' + r.searches + ' busca(s)).', r.price ? 'success' : 'warn');
+          } catch (err) {
+            market.delete(card.definitionId);
+            deps.overlay.refresh(card.definitionId);
+            log('Consulta de preço parada: ' + err.message, 'error');
+            if (err.fatal) break;
+          }
+          deps.overlay.refresh(card.definitionId);
+          done++;
+          if (done < todo.length) await sleepMs(randomBetween(1500, 3000, Math.random));
+        }
+      } finally {
+        modBusy = '';
+        priceBtn.classList.remove('busy');
+        priceBtn.textContent = '💲';
+      }
+    }
+
+    priceBtn.addEventListener('click', () => {
+      if (modBusy === 'preços') { modStop = true; log('Parando a consulta de preços…', 'warn'); return; }
+      checkPrices(null);
+    });
 
     function money(n) {
       return '<b class="' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '') + '">' + (n > 0 ? '+' : '') + fmt(n) + '</b>';
@@ -3398,7 +3545,8 @@
     }
 
     function suggestionFor(g) {
-      return g.futbin > 0 ? g.futbin : g.marketAverage > 0 ? g.marketAverage : 0;
+      const m = deps.market && deps.market.get(g.definitionId);
+      return m && m.price > 0 ? m.price : g.futbin > 0 ? g.futbin : 0;
     }
 
     function renderSellGroups() {
@@ -3409,7 +3557,8 @@
       }
       el('sellGroups').innerHTML = sellGroups.map((g) => {
         const sug = suggestionFor(g);
-        const ref = [g.marketAverage ? 'Média EA ' + fmt(g.marketAverage) : '', g.futbin ? 'FUTBIN ' + fmt(g.futbin) : '',
+        const m = deps.market && deps.market.get(g.definitionId);
+        const ref = [m && m.price > 0 ? 'Menor compre já agora ' + fmt(m.price) : '', g.futbin ? 'FUTBIN ' + fmt(g.futbin) : '',
           g.avgCost ? 'pago em média ' + fmt(g.avgCost) : 'preço pago desconhecido'].filter(Boolean).join(' · ');
         return '<div class="card sg" data-key="' + escapeHtml(g.key) + '">' +
           '<div class="sg-top"><b>' + escapeHtml(g.name + (g.rating ? ' ' + g.rating : '')) + '</b><span class="sg-count">Você tem ' + g.count +
@@ -3423,7 +3572,8 @@
           '<div class="ed-actions"><select data-s="duration"><option value="3600">1 hora</option><option value="10800">3 horas</option>' +
           '<option value="21600">6 horas</option><option value="43200">12 horas</option><option value="86400">1 dia</option>' +
           '<option value="259200">3 dias</option></select>' +
-          '<button data-act="sellFutbin" data-key="' + escapeHtml(g.key) + '">Preço FUTBIN</button></div>' +
+          '<button data-act="sellMarket" data-key="' + escapeHtml(g.key) + '">💲 Preço atual</button>' +
+          '<button data-act="sellFutbin" data-key="' + escapeHtml(g.key) + '">FUTBIN</button></div>' +
           '<div class="hint" data-s="est"></div></div>';
       }).join('');
       panel.querySelectorAll('.sg').forEach(updateEstimate);
@@ -3671,6 +3821,10 @@
         if (a === 'sellLoad') loadSellable();
         if (a === 'sellStart') startSell();
         if (a === 'sellFutbin') futbinForGroup(act.dataset.key);
+        if (a === 'sellMarket') {
+          const g = sellGroups.find((x) => x.key === act.dataset.key);
+          if (g) checkPrices([{ name: g.name, definitionId: g.definitionId, rating: g.rating }]).then(renderSellGroups);
+        }
         if (a === 'modStop') { modStop = true; log('Parando o módulo…', 'warn'); }
         return;
       }
@@ -3756,9 +3910,9 @@
       }
       const key = e.target.dataset.setting;
       if (key === 'priceSource') {
-        app.state.settings.priceSource = e.target.value === 'futbin' ? 'futbin' : 'ea';
+        app.state.settings.priceSource = e.target.value === 'futbin' ? 'futbin' : 'market';
         save();
-        log('Preço nas cartas: ' + (app.state.settings.priceSource === 'ea' ? 'média da EA' : 'FUTBIN') + '. Troque de tela para atualizar.', 'success');
+        log('Preço nas cartas: ' + (app.state.settings.priceSource === 'market' ? 'preço atual do mercado (botão 💲)' : 'FUTBIN') + '. Troque de tela para atualizar.', 'success');
         return;
       }
       if (key === 'dryRun') {
@@ -3871,6 +4025,7 @@
     // pilhas que ele já carregou (lista de transferências etc.).
     const entities = new Map();
     entities.screens = new Map();
+    const market = createMarketCache();
     const piles = {};
     let ui = null;
     let lookup = null;
@@ -3886,7 +4041,7 @@
     const prices = createPriceService(futbinRequest, futbin);
     const overlay = createPriceOverlay(win, prices, () => app.state.settings, (msg) => {
       if (ui) ui.log('FUTBIN: ' + msg, 'error');
-    }, entities);
+    }, entities, market);
     const engine = new Autobuyer({
       adapter,
       getState: () => app.state,
@@ -3923,7 +4078,7 @@
       entityName: (e) => itemNameOf(e),
       playerName: (assetId) => playersDb.name(assetId),
     };
-    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay, names, players: playersDb, piles, entities, lookup });
+    ui = createUI(win, { app, store, engine, adapter, futbin, prices, overlay, names, players: playersDb, piles, entities, lookup, market });
     ui.log('Painel carregado. Aguardando o Web App...');
 
     const timer = setInterval(() => {
@@ -3954,7 +4109,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

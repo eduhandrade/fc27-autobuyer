@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.2.0
+// @version      1.2.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.2.0';
+  const SCRIPT_VERSION = '1.2.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2117,7 +2117,7 @@
       const next = prevPrice(best);
       if (next >= best || next < 200) break;
       max = next;
-      await wait(randomBetween(700, 1400, random));
+      await wait(randomBetween(400, 800, random));
     }
     return { price: best, searches };
   }
@@ -2735,6 +2735,7 @@
 #fcab-panel .log .error{color:#ff6b6b}
 #fcab-panel .log .success{color:#4cd97b}
 #fcab-panel .full{width:100%;margin-top:8px}
+#fcab-panel button.price{background:#1f6feb;color:#fff}
 `;
 
   function escapeHtml(s) {
@@ -2851,6 +2852,8 @@
           <p class="hint">Carrega as cartas não anunciadas (ou expiradas) e agrupa as iguais. Escolha quantas vender e o preço.</p>
           <label><input type="checkbox" data-el="sellUnassigned"> Incluir "Não atribuídos"</label>
           <button class="full" data-act="sellLoad">Carregar minhas cartas</button>
+          <button class="full price" data-act="sellPrices" data-el="sellPrices" hidden>💲 Buscar preço atual de todas</button>
+          <p class="hint">O preço atual é o menor "compre já" anunciado agora no mercado da EA (até 20 cartas por toque; as buscas contam no limite da EA).</p>
           <div data-el="sellGroups"></div>
           <div class="ed-actions" data-el="sellActions" hidden>
             <button class="go" data-act="sellStart">Anunciar selecionadas</button>
@@ -2903,7 +2906,7 @@
       const c = deps.overlay && deps.overlay.counters();
       const msg = c && c.lastError;
       box.hidden = !msg;
-      if (msg) box.textContent = '⚠️ FUTBIN não respondeu direito (as cartas mostram a média da EA quando disponível): ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
+      if (msg) box.textContent = '⚠️ FUTBIN não respondeu direito (use o botão 💲 para ver o preço atual): ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
     }
 
     function renderStatus() {
@@ -3239,13 +3242,18 @@
 
     // Botão 💲: consulta, uma a uma, o menor "compre já" das cartas na tela
     // (ou das informadas) e vai mostrando o preço em cada carta.
-    const PRICE_CHECK_LIMIT = 12;
-    async function checkPrices(cards) {
+    const PRICE_CHECK_LIMIT = 20;
+    // opts.onUpdate(card) é chamado sempre que o preço de uma carta muda;
+    // opts.progress(texto) mostra o andamento em outro botão.
+    async function checkPrices(cards, opts) {
+      opts = opts || {};
+      const onUpdate = opts.onUpdate || (() => {});
+      const progress = opts.progress || (() => {});
       if (engine.running || modBusy) { win.alert('Pare o bot/módulo antes de consultar preços.'); return; }
       const market = deps.market;
       const list = (cards || deps.overlay.visibleCards()).filter((c) => c && c.definitionId > 0 && !(market.get(c.definitionId) || {}).price);
       if (!list.length) {
-        win.alert(cards ? 'Preço já consultado há pouco.' : 'Nenhuma carta de jogador na tela (ou os preços já foram consultados há pouco).');
+        if (!opts.quiet) win.alert(cards ? 'Preço já consultado há pouco.' : 'Nenhuma carta de jogador na tela (ou os preços já foram consultados há pouco).');
         return;
       }
       const todo = list.slice(0, PRICE_CHECK_LIMIT);
@@ -3258,8 +3266,10 @@
         for (const card of todo) {
           if (modStop) break;
           priceBtn.textContent = (done + 1) + '/' + todo.length;
+          progress((done + 1) + '/' + todo.length);
           market.set(card.definitionId, { state: 'checking' });
           deps.overlay.refresh(card.definitionId);
+          onUpdate(card);
           try {
             const r = await lowestBin({ adapter, card });
             market.set(card.definitionId, { price: r.price || 0 });
@@ -3272,13 +3282,15 @@
             if (err.fatal) break;
           }
           deps.overlay.refresh(card.definitionId);
+          onUpdate(card);
           done++;
-          if (done < todo.length) await sleepMs(randomBetween(1500, 3000, Math.random));
+          if (done < todo.length && !modStop) await sleepMs(randomBetween(800, 1600, Math.random));
         }
       } finally {
         modBusy = '';
         priceBtn.classList.remove('busy');
         priceBtn.textContent = '💲';
+        progress('');
       }
     }
 
@@ -3528,6 +3540,7 @@
         }
         sellGroups = groupSellable(items, ledger());
         renderSellGroups();
+        el('sellPrices').hidden = !sellGroups.length;
         const st = sellableStats(items);
         const missing = sellGroups.reduce((n, g) => n + g.items.filter((it) => !it.raw).length, 0);
         const summary = 'Li ' + st.total + ' carta(s)' + (lastPileMethod ? ' (via ' + lastPileMethod + ')' : '') + ': ' + st.ready +
@@ -3549,6 +3562,44 @@
       return m && m.price > 0 ? m.price : g.futbin > 0 ? g.futbin : 0;
     }
 
+    function sellRef(g) {
+      const m = deps.market && deps.market.get(g.definitionId);
+      return [m && m.state === 'checking' ? 'Consultando preço atual…' : m && m.price > 0 ? 'Menor compre já agora ' + fmt(m.price) : m ? 'Nenhum anúncio de compre já agora' : '',
+        g.futbin ? 'FUTBIN ' + fmt(g.futbin) : '',
+        g.avgCost ? 'pago em média ' + fmt(g.avgCost) : 'preço pago desconhecido'].filter(Boolean).join(' · ');
+    }
+
+    // Atualiza só o preço de um grupo, sem apagar o que você já digitou.
+    function refreshSellGroup(defId) {
+      for (const g of sellGroups) {
+        if (g.definitionId !== defId) continue;
+        const card = panel.querySelector('.sg[data-key="' + cssEscape(g.key) + '"]');
+        if (!card) continue;
+        card.querySelector('[data-s="ref"]').textContent = sellRef(g) + (g.minPrice ? ' · EA permite ' + fmt(g.minPrice) + '–' + fmt(g.maxPrice) : '');
+        const bin = card.querySelector('[data-s="bin"]');
+        const sug = suggestionFor(g);
+        if (sug && !bin.dataset.typed) bin.value = roundDown(sug);
+        updateEstimate(card);
+      }
+    }
+
+    function cssEscape(v) {
+      return String(v).replace(/["\\]/g, '\\$&');
+    }
+
+    function checkSellPrices(groups, button) {
+      if (modBusy === 'preços') { modStop = true; log('Parando a consulta de preços…', 'warn'); return; }
+      const cards = groups.filter((g) => g.definitionId > 0).map((g) => ({ name: g.name, definitionId: g.definitionId, rating: g.rating }));
+      const label = button ? button.textContent : '';
+      checkPrices(cards, {
+        quiet: groups.length > 1,
+        onUpdate: (c) => refreshSellGroup(c.definitionId),
+        progress: (t) => { if (button) button.textContent = t ? 'Consultando ' + t + ' (toque para parar)' : label; },
+      }).then(() => {
+        groups.forEach((g) => refreshSellGroup(g.definitionId));
+      });
+    }
+
     function renderSellGroups() {
       el('sellActions').hidden = !sellGroups.length;
       if (!sellGroups.length) {
@@ -3557,13 +3608,11 @@
       }
       el('sellGroups').innerHTML = sellGroups.map((g) => {
         const sug = suggestionFor(g);
-        const m = deps.market && deps.market.get(g.definitionId);
-        const ref = [m && m.price > 0 ? 'Menor compre já agora ' + fmt(m.price) : '', g.futbin ? 'FUTBIN ' + fmt(g.futbin) : '',
-          g.avgCost ? 'pago em média ' + fmt(g.avgCost) : 'preço pago desconhecido'].filter(Boolean).join(' · ');
+        const ref = sellRef(g);
         return '<div class="card sg" data-key="' + escapeHtml(g.key) + '">' +
           '<div class="sg-top"><b>' + escapeHtml(g.name + (g.rating ? ' ' + g.rating : '')) + '</b><span class="sg-count">Você tem ' + g.count +
           (g.items.some((it) => !it.raw) ? ' (' + g.items.filter((it) => it.raw).length + ' prontas)' : '') + '</span></div>' +
-          '<p class="hint">' + escapeHtml(ref) + (g.minPrice ? ' · EA permite ' + fmt(g.minPrice) + '–' + fmt(g.maxPrice) : '') + '</p>' +
+          '<p class="hint" data-s="ref">' + escapeHtml(ref) + (g.minPrice ? ' · EA permite ' + fmt(g.minPrice) + '–' + fmt(g.maxPrice) : '') + '</p>' +
           '<div class="grid3">' +
           '<div><label>Quantas</label><input data-s="qty" inputmode="numeric" value="0"></div>' +
           '<div><label>Compre já</label><input data-s="bin" inputmode="numeric" value="' + (sug ? roundDown(sug) : '') + '"></div>' +
@@ -3572,8 +3621,7 @@
           '<div class="ed-actions"><select data-s="duration"><option value="3600">1 hora</option><option value="10800">3 horas</option>' +
           '<option value="21600">6 horas</option><option value="43200">12 horas</option><option value="86400">1 dia</option>' +
           '<option value="259200">3 dias</option></select>' +
-          '<button data-act="sellMarket" data-key="' + escapeHtml(g.key) + '">💲 Preço atual</button>' +
-          '<button data-act="sellFutbin" data-key="' + escapeHtml(g.key) + '">FUTBIN</button></div>' +
+          '<button data-act="sellMarket" data-key="' + escapeHtml(g.key) + '">💲 Preço atual</button></div>' +
           '<div class="hint" data-s="est"></div></div>';
       }).join('');
       panel.querySelectorAll('.sg').forEach(updateEstimate);
@@ -3597,18 +3645,6 @@
         ' cada, já sem os 5% da EA' +
         (o.prices.profitPerCard != null ? ' · lucro ' + money(o.prices.profitPerCard) + ' cada, ' + money(o.prices.profitPerCard * o.qty) + ' no total' : '') +
         (o.prices.notes.length ? ' · ' + escapeHtml(o.prices.notes.join(', ')) : '');
-    }
-
-    async function futbinForGroup(key) {
-      const g = sellGroups.find((x) => x.key === key);
-      if (!g || !g.definitionId) return;
-      try {
-        const r = await futbin.price({ name: g.name, definitionId: g.definitionId, rating: g.rating }, app.state.settings.platform);
-        g.futbin = r.price;
-        renderSellGroups();
-      } catch (err) {
-        win.alert('FUTBIN: ' + err.message + '. Use a média da EA ou digite o preço.');
-      }
     }
 
     async function startSell() {
@@ -3820,11 +3856,11 @@
         if (a === 'bidCollect') collectBids();
         if (a === 'sellLoad') loadSellable();
         if (a === 'sellStart') startSell();
-        if (a === 'sellFutbin') futbinForGroup(act.dataset.key);
         if (a === 'sellMarket') {
           const g = sellGroups.find((x) => x.key === act.dataset.key);
-          if (g) checkPrices([{ name: g.name, definitionId: g.definitionId, rating: g.rating }]).then(renderSellGroups);
+          if (g) checkSellPrices([g], null);
         }
+        if (a === 'sellPrices') checkSellPrices(sellGroups, act);
         if (a === 'modStop') { modStop = true; log('Parando o módulo…', 'warn'); }
         return;
       }
@@ -3895,6 +3931,7 @@
 
     panel.addEventListener('input', (e) => {
       const card = e.target.closest('.sg');
+      if (card && e.target.dataset.s === 'bin') e.target.dataset.typed = '1';
       if (card && e.target.dataset.s) updateEstimate(card);
     });
 

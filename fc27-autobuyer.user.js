@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.2.1
+// @version      1.2.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @grant        none
@@ -20,7 +20,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.2.1';
+  const SCRIPT_VERSION = '1.2.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2612,6 +2612,14 @@
     };
   }
 
+  // Mantém os botões flutuantes inteiros dentro da tela.
+  function clampDock(pos, size, view) {
+    const m = 4;
+    const x = Math.min(Math.max(m, pos.x), Math.max(m, view.w - size.w - m));
+    const y = Math.min(Math.max(m, pos.y), Math.max(m, view.h - size.h - m));
+    return { x: Math.round(x), y: Math.round(y) };
+  }
+
   function parseCoins(text) {
     const digits = String(text == null ? '' : text).replace(/\D/g, '');
     return digits ? parseInt(digits, 10) : 0;
@@ -2627,9 +2635,12 @@
 .fcab-fb-inline{position:static;display:inline-block;margin:4px 0 4px 8px;vertical-align:middle}
 .fcab-fb-corner{position:absolute;top:8px;right:44px}
 .fcab-fb.fcab-good{background:#0f3d22;color:#4cd97b;border-color:#4cd97b}
-#fcab-price{position:fixed;right:14px;bottom:154px;z-index:2147483646;min-width:44px;height:44px;border-radius:22px;border:0;padding:0 10px;background:#1f6feb;color:#fff;font:700 16px -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+#fcab-dock{position:fixed;right:12px;bottom:96px;z-index:2147483646;display:flex;flex-direction:column;align-items:center;gap:10px;touch-action:none;-webkit-user-select:none;user-select:none}
+#fcab-dock.dragging{opacity:.75}
+#fcab-dock.dragging button{transform:scale(1.08)}
+#fcab-price{touch-action:none;min-width:44px;height:44px;border-radius:22px;border:0;padding:0 10px;background:#1f6feb;color:#fff;font:700 16px -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #fcab-price.busy{background:#9a6700;font-size:13px}
-#fcab-toggle{position:fixed;right:12px;bottom:96px;z-index:2147483646;width:48px;height:48px;border-radius:50%;border:0;background:#1db954;color:#fff;font-size:22px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+#fcab-toggle{touch-action:none;width:48px;height:48px;border-radius:50%;border:0;background:#1db954;color:#fff;font-size:22px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 #fcab-panel{position:fixed;right:8px;bottom:8px;z-index:2147483647;width:min(380px,calc(100vw - 16px));max-height:78vh;overflow:auto;background:#15171c;color:#e8e8e8;border:1px solid #333;border-radius:12px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.6)}
 #fcab-panel[hidden]{display:none}
 #fcab-panel *{box-sizing:border-box}
@@ -2775,6 +2786,12 @@
     priceBtn.textContent = '💲';
     priceBtn.title = 'Preço atual no mercado das cartas da tela';
 
+    // ⚡ e 💲 ficam juntos e dá para arrastá-los para qualquer canto da tela.
+    const dock = doc.createElement('div');
+    dock.id = 'fcab-dock';
+    dock.appendChild(priceBtn);
+    dock.appendChild(toggle);
+
     const panel = doc.createElement('div');
     panel.id = 'fcab-panel';
     panel.hidden = true;
@@ -2821,6 +2838,8 @@
       </section>
       <section data-pane="settings" hidden>
         <div data-el="settings"></div>
+        <p class="hint">Os botões ⚡ e 💲 podem ser arrastados para qualquer lugar da tela: toque, segure e arraste.</p>
+        <button class="full" data-act="dockReset">Voltar os botões ⚡ 💲 para o lugar padrão</button>
         <button class="full" data-act="diagnose">Diagnóstico do Web App</button>
         <div class="hint" data-el="diag"></div>
       </section>
@@ -2883,9 +2902,59 @@
       </section>
     `;
 
-    doc.body.appendChild(toggle);
-    doc.body.appendChild(priceBtn);
+    doc.body.appendChild(dock);
     doc.body.appendChild(panel);
+
+    function placeDock(pos) {
+      if (!pos) {
+        dock.style.left = dock.style.top = dock.style.right = dock.style.bottom = '';
+        return;
+      }
+      const r = dock.getBoundingClientRect();
+      const p = clampDock(pos, { w: r.width, h: r.height }, { w: win.innerWidth, h: win.innerHeight });
+      dock.style.left = p.x + 'px';
+      dock.style.top = p.y + 'px';
+      dock.style.right = dock.style.bottom = 'auto';
+    }
+
+    // Toque rápido = botão normal; arrastar mais de 8 px = mover os botões.
+    let drag = null;
+    let ignoreClickUntil = 0;
+    dock.addEventListener('pointerdown', (e) => {
+      const r = dock.getBoundingClientRect();
+      drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, x: r.left, y: r.top, moved: false };
+    });
+    dock.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      if (!drag.moved) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        drag.moved = true;
+        dock.classList.add('dragging');
+        try { dock.setPointerCapture(e.pointerId); } catch (err) { /* sem captura */ }
+      }
+      e.preventDefault();
+      placeDock({ x: drag.x + dx, y: drag.y + dy });
+    });
+    function endDrag() {
+      if (!drag) return;
+      if (drag.moved) {
+        const r = dock.getBoundingClientRect();
+        app.state.settings.dock = { x: Math.round(r.left), y: Math.round(r.top) };
+        save();
+        dock.classList.remove('dragging');
+        ignoreClickUntil = Date.now() + 400;
+      }
+      drag = null;
+    }
+    dock.addEventListener('pointerup', endDrag);
+    dock.addEventListener('pointercancel', endDrag);
+    dock.addEventListener('click', (e) => {
+      if (Date.now() < ignoreClickUntil) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+    win.addEventListener('resize', () => placeDock(app.state.settings.dock));
+    placeDock(app.state.settings.dock);
 
     const el = (name) => panel.querySelector('[data-el="' + name + '"]');
 
@@ -3824,6 +3893,11 @@
           if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
         }
         if (a === 'add') addTarget();
+        if (a === 'dockReset') {
+          app.state.settings.dock = null;
+          save();
+          placeDock(null);
+        }
         if (a === 'diagnose') {
           const hooks = deps.overlay.installed();
           const bulk = deps.prices.bulkStatus();
@@ -4146,7 +4220,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

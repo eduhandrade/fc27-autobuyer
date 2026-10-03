@@ -49,6 +49,7 @@ Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 - O modo simulação vale para os três módulos.
 
 ## Preço nas cartas (botão 💲)
+- Os botões ⚡ e 💲 podem ser arrastados: toque, segure e arraste para onde não atrapalhe. A posição fica salva; para voltar ao lugar padrão use **Config → Voltar os botões ⚡ 💲 para o lugar padrão**.
 - Acima do botão ⚡ fica o botão azul **💲**. Toque nele com cartas na tela (resultados do mercado, lista de transferências, clube): o script consulta, carta a carta, o **menor "compre já" anunciado agora no mercado da EA** e vai colocando a etiqueta **Agora 2.500** em cada carta conforme encontra. "Agora: sem anúncio" quer dizer que não há nenhuma anunciada.
 - Cada toque consulta até 20 cartas, com 0,8–1,6 s entre elas. Cada carta usa de 1 a 3 buscas no mercado, que **contam no limite de buscas da EA** — use com moderação. O botão mostra o progresso (ex.: 3/12); toque de novo para parar.
 - O preço fica guardado por 10 minutos (cartas já consultadas não são buscadas de novo). Não funciona enquanto o sniper ou outro módulo estiver rodando.

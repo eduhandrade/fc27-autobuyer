@@ -82,3 +82,6 @@ Tudo fica em um único arquivo, `fc27-autobuyer.user.js`, sem etapa de build. Te
 ```sh
 npm test
 ```
+
+## Servidor na nuvem (opcional)
+Para deixar rodando sem o iPhone ligado: veja [servidor/README.md](servidor/README.md) (Oracle Cloud grátis, configurado só pelo iPhone).

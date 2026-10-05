@@ -1,5 +1,8 @@
 # Servidor grátis na nuvem (feito só pelo iPhone)
 
+> **Onde paramos (05/10/2026):** conta do Tailscale criada; estava na página *Keys* para gerar a chave (Parte 1, passo 4).
+> Próximo: gerar a chave, depois Parte 2 (texto de instalação) e Parte 3 (conta na Oracle). Depois de criar o servidor, falta instalar o bot no Firefox de lá.
+
 Um computador da Oracle Cloud (grátis para sempre no plano "Always Free") com área de trabalho e Firefox.
 Você acessa a tela dele pelo iPhone. O que roda lá continua rodando com o celular travado ou desligado.
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.3.1
+// @version      1.3.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.3.1';
+  const SCRIPT_VERSION = '1.3.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2700,6 +2700,8 @@
 #fcab-panel .rows .r div:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #fcab-panel .sg-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
 #fcab-panel .sg-count{font-size:13px;background:#12344d;color:#6fc3ff;border-radius:999px;padding:2px 8px;white-space:nowrap}
+#fcab-panel .profit-line{margin-top:6px}
+#fcab-panel .profit-line span{color:#9aa0a6;font-size:12px}
 #fcab-panel .stepper{display:flex;gap:4px;align-items:stretch}
 #fcab-panel .stepper input{min-width:0;flex:1;text-align:center}
 #fcab-panel .stepper button{flex:none;width:36px;padding:0;font-size:20px;font-weight:700}
@@ -3032,8 +3034,9 @@
       const box = el('fberr');
       const c = deps.overlay && deps.overlay.counters();
       const msg = c && c.lastError;
-      box.hidden = !msg;
-      if (msg) box.textContent = '⚠️ FUTBIN não respondeu direito (use o botão 💲 para ver o preço atual): ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
+      // O aviso vermelho saiu: o FUTBIN bloqueia quase sempre e o erro já fica no Log.
+      box.hidden = true;
+      if (msg && futbinOn()) box.textContent = '⚠️ FUTBIN não respondeu direito (use o botão 💲 para ver o preço atual): ' + msg + ' (' + c.priced + ' preços ok, ' + c.failed + ' falhas)';
     }
 
     function renderStatus() {
@@ -3085,13 +3088,14 @@
           <div class="tags">${tags || '<span class="tag">sem filtros</span>'}</div>
           ${problem ? '<div class="warnbox">⚠️ ' + escapeHtml(problem) + '</div>' : ''}
           <div class="fe-box" hidden></div>
-          ${t.kind === 'player' ? '<div class="fb">' + futbinLine(t) + '</div>' : ''}
+          ${t.kind === 'player' && futbinOn() ? '<div class="fb">' + futbinLine(t) + '</div>' : ''}
           <div class="grid">
             <div><label>Compra até</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
             <div><label>Revende por</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"><button type="button" data-step="+" data-from="[data-f=maxBuy]" aria-label="Aumentar">+</button></div></div>
             <div><label>Quantidade</label><input data-f="maxCount" inputmode="numeric" placeholder="sem limite" value="${t.maxCount > 0 ? t.maxCount : ''}"></div>
             <div class="count"><label>Progresso</label><div><b>${escapeHtml(countLabel(t))}</b>${t.bought ? ' <button data-f="resetCount">Zerar</button>' : ''}</div></div>
           </div>
+          <div class="hint profit-line" data-el-profit>${targetProfitHtml(t.maxBuy, t.sellPrice)}</div>
         </div>`;
       }).join('');
     }
@@ -3303,6 +3307,26 @@
       newEditor.load(kindFromCriteria(app.captured), app.captured, null, app.capturedLabels);
     }
 
+    // Lucro por carta se comprar pelo "Compra até" e vender pelo "Revende por".
+    function targetProfitHtml(buy, sell) {
+      if (!(sell > 0)) return 'Lucro: preencha "Revende por" para ver.';
+      if (!(buy > 0)) return '';
+      const profit = netAfterTax(sell) - buy;
+      return 'Lucro por carta: ' + money(profit) + ' <span>(vende ' + fmt(sell) + ' − 5% EA = ' + fmt(netAfterTax(sell)) + ' − compra ' + fmt(buy) + ')</span>';
+    }
+
+    function updateTargetProfit(card) {
+      const box = card && card.querySelector('[data-el-profit]');
+      if (!box) return;
+      const buy = parseCoins(card.querySelector('[data-f=maxBuy]').value);
+      const sell = parseCoins(card.querySelector('[data-f=sellPrice]').value);
+      box.innerHTML = targetProfitHtml(buy, sell);
+    }
+
+    function futbinOn() {
+      return app.state.settings.priceSource === 'futbin';
+    }
+
     function futbinLine(t) {
       if (!t.card) return '<small>FUTBIN: pesquise esse jogador no mercado (ou inicie o bot) para identificar a carta.</small>';
       const f = t.futbin;
@@ -3329,6 +3353,7 @@
     }
 
     async function refreshStalePrices() {
+      if (!futbinOn()) return;
       for (const t of app.state.targets) {
         if (t.card && (!t.futbin || Date.now() - t.futbin.at > FUTBIN_MAX_AGE)) await refreshTargetPrice(t, true);
       }
@@ -4036,6 +4061,7 @@
         return;
       }
       el('newName').value = card.name + ' ' + (card.rating || '');
+      if (!futbinOn()) return;
       futbin.price(card, app.state.settings.platform).then((f) => {
         if (app.capturedCard !== card) return;
         app.capturedFutbin = f;
@@ -4287,6 +4313,8 @@
     el('sbcList').addEventListener('change', onSbcInput);
 
     panel.addEventListener('input', (e) => {
+      const f = e.target.dataset && e.target.dataset.f;
+      if (f === 'maxBuy' || f === 'sellPrice') updateTargetProfit(e.target.closest('.tg'));
       const card = e.target.closest('.sg');
       if (card && e.target.dataset.s === 'bin') e.target.dataset.typed = '1';
       if (card && e.target.dataset.s) updateEstimate(card);
@@ -4357,6 +4385,7 @@
         target.enabled = e.target.checked;
       }
       if (f === 'maxBuy') target.maxBuy = parseCoins(e.target.value) || target.maxBuy;
+      if (f === 'maxBuy' || f === 'sellPrice') updateTargetProfit(tg);
       if (f === 'sellPrice') target.sellPrice = parseCoins(e.target.value);
       if (f === 'maxCount') {
         target.maxCount = parseCoins(e.target.value);

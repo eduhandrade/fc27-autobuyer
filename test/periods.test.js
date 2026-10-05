@@ -55,3 +55,20 @@ test('períodos prontos', () => {
   assert.equal(ab.dayKey(at(2026, 1, 5)), '2026-01-05');
   assert.equal(ab.dayRange('xx'), null);
 });
+
+test('lucro por alvo soma as vendas do alvo e das compras antigas da mesma carta', () => {
+  const ab3 = require('../fc27-autobuyer.user.js');
+  const kane = { id: 'k', kind: 'player', criteria: { maskedDefId: 202126 } };
+  const ledger = {
+    i1: { itemId: 1, definitionId: 202126, rating: 90, cost: 25750, status: 'vendida', soldFor: 27250, targetId: 'k' },
+    i2: { itemId: 2, definitionId: 202126, rating: 90, cost: 25500, status: 'vendida', soldFor: 27250 },
+    i3: { itemId: 3, definitionId: 202126, rating: 90, cost: 25750, status: 'à venda', targetId: 'k' },
+    i4: { itemId: 4, definitionId: 202126, rating: 90, cost: 25750, status: 'vendida', soldFor: 27000, targetId: 'outro' },
+    i5: { itemId: 5, definitionId: 999, rating: 80, cost: 1000, status: 'vendida', soldFor: 2000 },
+    i6: { itemId: 6, definitionId: 202126, rating: 90, cost: 25000, status: 'removida', targetId: 'k' },
+  };
+  const r = ab3.targetLedgerStats(kane, ledger);
+  assert.equal(r.sold, 2);
+  assert.equal(r.profit, (25887 - 25750) + (25887 - 25500));
+  assert.equal(r.open, 1);
+});

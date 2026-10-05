@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.3.3
+// @version      1.3.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.3.3';
+  const SCRIPT_VERSION = '1.3.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1361,6 +1361,7 @@
       source: e.source || cur.source || 'bot',
       boughtAt: e.at || cur.boughtAt || Date.now(),
       status: cur.status || 'comprada',
+      targetId: e.targetId || cur.targetId || undefined,
     });
     return ledger[key];
   }
@@ -1404,6 +1405,32 @@
       }
     }
     return changes;
+  }
+
+  // Resultado das compras de um alvo: as registradas com o alvo e, das mais
+  // antigas (sem alvo anotado), as da mesma carta do alvo.
+  function targetLedgerStats(t, ledger) {
+    const c = (t && t.criteria) || {};
+    const out = { sold: 0, profit: 0, open: 0, openCost: 0, unknown: 0 };
+    const sameCard = (e) => t.kind === 'player' && c.maskedDefId > 0 && e.definitionId > 0 &&
+      baseDefId(e.definitionId) === baseDefId(c.maskedDefId) &&
+      (!(t.definitionId > 0) || e.definitionId === t.definitionId) &&
+      (!(t.minRating > 0) || !(e.rating > 0) || e.rating >= t.minRating) &&
+      (!(t.maxRating > 0) || !(e.rating > 0) || e.rating <= t.maxRating);
+    for (const e of Object.values(ledger || {})) {
+      if (e.status === 'removida') continue;
+      if (e.targetId ? e.targetId !== t.id : !sameCard(e)) continue;
+      if (e.status === 'vendida') {
+        const p = entryProfit(e);
+        if (p == null) { out.unknown++; continue; }
+        out.sold++;
+        out.profit += p;
+      } else {
+        out.open++;
+        out.openCost += e.cost > 0 ? e.cost : 0;
+      }
+    }
+    return out;
   }
 
   function entryProfit(e) {
@@ -1781,6 +1808,7 @@
         name: item.name,
         price: item.buyNow,
         target: target.name,
+        targetId: target.id,
         sellPrice: target.sellPrice > 0 ? roundDown(target.sellPrice) : 0,
         listed: false,
       };
@@ -2701,6 +2729,8 @@
 #fcab-panel .rows .r div:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #fcab-panel .sg-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
 #fcab-panel .sg-count{font-size:13px;background:#12344d;color:#6fc3ff;border-radius:999px;padding:2px 8px;white-space:nowrap}
+#fcab-panel .tg-result{font-size:13px;margin-top:3px}
+#fcab-panel .tg-result span{color:#9aa0a6;font-size:12px}
 #fcab-panel .profit-line{margin-top:6px}
 #fcab-panel .profit-line span{color:#9aa0a6;font-size:12px}
 #fcab-panel .stepper{display:flex;gap:4px;align-items:stretch}
@@ -3093,7 +3123,7 @@
         <div class="tg card${t.enabled ? ' on' : ''}" data-id="${escapeHtml(t.id)}">
           <div class="tg-top">
             <label class="sw"><input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''} ${problem ? 'disabled' : ''}><span></span></label>
-            <div class="tg-title"><div class="name">${escapeHtml(t.name)}</div>${kindPill}${done ? ' <span class="pill pill-done">Concluído</span>' : ''}</div>
+            <div class="tg-title"><div class="name">${escapeHtml(t.name)}</div>${kindPill}${done ? ' <span class="pill pill-done">Concluído</span>' : ''}${targetResultHtml(t)}</div>
             <button class="icon" data-f="editFilters" title="Editar filtros">✎</button>
             <button class="icon" data-f="remove" title="Excluir">🗑</button>
           </div>
@@ -3317,6 +3347,17 @@
 
     function renderNewFilters() {
       newEditor.load(kindFromCriteria(app.captured), app.captured, null, app.capturedLabels);
+    }
+
+    // Lucro já obtido com as cartas deste alvo (registro da aba Lucro).
+    function targetResultHtml(t) {
+      const r = targetLedgerStats(t, app.state.ledger);
+      if (!r.sold && !r.open && !r.unknown) return '';
+      const parts = [];
+      if (r.sold) parts.push(r.sold + ' vendida(s)');
+      if (r.open) parts.push(r.open + ' aguardando venda');
+      if (r.unknown) parts.push(r.unknown + ' sem preço pago');
+      return '<div class="tg-result">Lucro: ' + money(r.profit) + ' <span>· ' + parts.join(' · ') + '</span></div>';
     }
 
     // Lucro por carta se comprar pelo "Compra até" e vender pelo "Revende por".
@@ -4420,6 +4461,7 @@
       onCaptured,
       syncFromTransferList(items) {
         applySync(items, true);
+        if (!panel.hidden && tab === 'targets' && !el('targets').contains(doc.activeElement)) renderTargets();
       },
       refreshTargets() {
         renderTargets();
@@ -4733,7 +4775,7 @@
         app.state.history.unshift(p);
         if (app.state.history.length > 100) app.state.history.length = 100;
         if (!app.state.ledger) app.state.ledger = {};
-        recordBuy(app.state.ledger, { itemId: p.itemId, name: p.name, rating: p.rating, definitionId: p.definitionId, price: p.price, source: 'bot', at: p.at });
+        recordBuy(app.state.ledger, { itemId: p.itemId, name: p.name, rating: p.rating, definitionId: p.definitionId, price: p.price, source: 'bot', at: p.at, targetId: p.targetId });
         store.save(app.state);
       },
       // Alvos criados por ID ainda não sabem qual é a carta; a primeira busca
@@ -4793,7 +4835,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, stepPrice, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, stepPrice, targetLedgerStats, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.2.2
+// @version      1.3.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
+// @match        https://www.futbin.com/*
 // @grant        none
 // @inject-into  page
 // @updateURL    https://raw.githubusercontent.com/eduhandrade/fc27-autobuyer/main/fc27-autobuyer.user.js
@@ -20,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.2.2';
+  const SCRIPT_VERSION = '1.3.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -407,6 +408,7 @@
     }
     if (target.kind === 'player') {
       if (it.kind !== 'player') return 'não é jogador';
+      if (target.definitionId > 0 && it.definitionId !== target.definitionId) return 'outra versão da carta';
       const need = (want, got, article, noun) => {
         if (isEmptyValue(want)) return null;
         if (got == null) return 'não deu para confirmar ' + article + ' ' + noun;
@@ -2475,6 +2477,25 @@
         return result(await observe(G('services').Item.list(raw, startBid, buyNow, duration || 3600)));
       },
 
+      // Quais destas cartas (definitionId) já estão no clube.
+      async clubOwned(defIds, lookup) {
+        const svc = G('services') && G('services').Club;
+        const DTO = G('UTSearchCriteriaDTO');
+        if (!svc || typeof svc.search !== 'function' || !DTO) return { success: false, missing: true, owned: new Set() };
+        const dto = new DTO();
+        try { dto.type = 'player'; } catch (e) { /* só leitura */ }
+        try { dto.defId = defIds.slice(); } catch (e) { /* só leitura */ }
+        try { dto.count = 100; } catch (e) { /* só leitura */ }
+        let observable;
+        try { observable = svc.search(dto); } catch (e) { return { success: false, status: 'erro ' + e.message, owned: new Set() }; }
+        if (!observable || typeof observable.observe !== 'function') return { success: false, status: 'resposta inesperada', owned: new Set() };
+        const response = await observe(observable, 15000);
+        const list = findItemArray(response) || [];
+        const want = new Set(defIds);
+        const owned = new Set(list.map(convert(lookup)).filter(Boolean).map((it) => it.definitionId).filter((id) => want.has(id)));
+        return Object.assign(result(response), { success: !!response.success || list.length > 0, owned });
+      },
+
       // Pilhas da conta: lista de transferências, não atribuídos e lances.
       async pile(which, lookup) {
         const svc = G('services') && G('services').Item;
@@ -2602,6 +2623,7 @@
           targets: (Array.isArray(saved.targets) ? saved.targets : []).map(migrateTarget),
           history: Array.isArray(saved.history) ? saved.history : [],
           ledger: saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {},
+          sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
         };
       },
       save(state) {
@@ -2651,11 +2673,15 @@
 #fcab-panel button:disabled{opacity:.4}
 #fcab-panel button.go{background:#1db954;color:#fff}
 #fcab-panel button.no{background:#c0392b;color:#fff}
+#fcab-panel .sbc-row{display:grid;grid-template-columns:26px 1fr 86px;gap:8px;align-items:center;padding:7px 0;border-top:1px solid #2a2d33}
+#fcab-panel .sbc-row input[type=checkbox]{width:22px;height:22px}
+#fcab-panel .sbc-head{font-size:11px;color:#9aa0a6;border-top:0;padding-bottom:0}
+#fcab-panel textarea{width:100%;box-sizing:border-box;font-size:16px;padding:7px;border-radius:6px;border:1px solid #3b3f47;background:#0e0f12;color:#fff;margin-top:8px}
 #fcab-panel .fberr{margin:0 10px 8px;padding:8px;border-radius:8px;background:#3a1d1d;color:#ffb4b4;font-size:12px;word-break:break-word}
 #fcab-panel .fberr[hidden]{display:none}
 #fcab-panel .stats{padding:8px 10px;font-size:12px;color:#aaa;display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
 #fcab-panel .stats b{color:#fff;display:block;font-size:14px}
-#fcab-panel .tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:0 10px 8px}
+#fcab-panel .tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:0 10px 8px}
 #fcab-panel .tabs button{padding:7px 4px;font-size:13px}
 #fcab-panel .kpis{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:8px 0}
 #fcab-panel .kpi{background:#12151a;border-radius:10px;padding:8px}
@@ -2807,6 +2833,7 @@
       <div class="fberr" data-el="fberr" hidden></div>
       <div class="tabs">
         <button data-tab="targets">🎯 Sniper</button>
+        <button data-tab="sbc">🧩 SBC</button>
         <button data-tab="bids">🔨 Lances</button>
         <button data-tab="sell">🏷️ Vender</button>
         <button data-tab="profit">💰 Lucro</button>
@@ -2879,6 +2906,27 @@
             <button class="no" data-act="modStop">Parar</button>
           </div>
           <div class="result" data-el="sellResult" hidden></div>
+        </div>
+      </section>
+      <section data-pane="sbc" hidden>
+        <div class="card">
+          <div class="card-h">🧩 SBC pela solução do FUTBIN</div>
+          <p class="hint">1) No Safari, abra no FUTBIN a solução mais barata do SBC e toque no selo verde até aparecerem os preços (são de console).
+            2) Toque em <b>🧩 Enviar ao bot</b>. 3) Volte aqui e toque em <b>Colar solução</b>. Confira os jogadores e quanto pagar por cada um, e crie os alvos.</p>
+          <button class="full price" data-act="sbcPaste">📋 Colar solução do FUTBIN</button>
+          <textarea data-el="sbcCode" rows="2" placeholder="Se não colar sozinho: toque e segure aqui → Colar"></textarea>
+          <button class="full" data-act="sbcImport">Importar código colado</button>
+          <div data-el="sbcList"></div>
+          <div data-el="sbcActions" hidden>
+            <p class="hint" data-el="sbcTotal"></p>
+            <button class="full" data-act="sbcClub">🏠 Conferir no clube</button>
+            <button class="full price" data-act="sbcPrices">💲 Preço atual dos marcados</button>
+            <button class="full" data-act="sbcUseNow">Usar o preço atual como "pagar até"</button>
+            <label><input type="checkbox" data-el="sbcPauseOthers" checked> Pausar meus outros alvos enquanto isso</label>
+            <button class="full go" data-act="sbcCreate">🎯 Criar alvos no sniper</button>
+            <button class="full no" data-act="sbcClear">Remover alvos deste SBC</button>
+          </div>
+          <button class="full" data-act="sbcResume" data-el="sbcResume" hidden>Reativar meus alvos pausados</button>
         </div>
       </section>
       <section data-pane="profit" hidden>
@@ -2968,6 +3016,7 @@
       if (tab === 'log') renderLog();
       if (tab === 'profit') renderProfit();
       if (tab === 'bids') renderBidTargets();
+      if (tab === 'sbc') renderSbc();
     }
 
     function renderFutbinError() {
@@ -3588,6 +3637,205 @@
       }
     }
 
+    // ---------- SBC: solução do FUTBIN → alvos do sniper ----------
+    function importSbc(text) {
+      const r = decodeSbc(text);
+      if (r.error) return win.alert('Não deu para importar: ' + r.error + '.');
+      r.sbc.players.forEach((p) => { p.buy = true; p.max = p.price >= 200 ? p.price : 0; p.owned = ''; });
+      app.state.sbc = r.sbc;
+      save();
+      el('sbcCode').value = '';
+      renderSbc();
+      log('SBC importado: ' + r.sbc.name + ' (' + r.sbc.players.length + ' jogadores).', 'success');
+    }
+
+    async function pasteSbc() {
+      let text = '';
+      try { text = await win.navigator.clipboard.readText(); } catch (e) { text = ''; }
+      if (!text || text.indexOf('FCAB-SBC1:') < 0) {
+        win.alert('Não consegui ler a solução copiada. Toque e segure no campo de baixo → Colar → toque em "Importar código colado".');
+        el('sbcCode').focus();
+        return;
+      }
+      importSbc(text);
+    }
+
+    function sbcStatus(p) {
+      if (p.owned) return '✅ você já tem (' + p.owned + ')';
+      const t = app.state.targets.find((x) => x.sbc && x.definitionId === p.definitionId);
+      if (!t) return '';
+      if (targetDone(t)) return '✅ comprado';
+      return t.enabled ? '🎯 no sniper até ' + fmt(t.maxBuy) : '🎯 alvo desligado';
+    }
+
+    function sbcRowHtml(p, i) {
+      const m = deps.market && deps.market.get(p.definitionId);
+      const now = m && m.state === 'checking' ? 'Agora …' : m && m.price > 0 ? 'Agora ' + fmt(m.price) : m ? 'Agora: sem anúncio' : '';
+      const info = [p.price ? 'FUTBIN ' + fmt(p.price) : 'FUTBIN sem preço', now, sbcStatus(p)].filter(Boolean).join(' · ');
+      return '<div class="sbc-row" data-i="' + i + '">' +
+        '<input type="checkbox" data-sbc="buy"' + (p.buy ? ' checked' : '') + '>' +
+        '<div><b>' + escapeHtml(p.name) + '</b> ' + (p.rating || '') + ' <span class="hint">' + escapeHtml(p.position) + '</span>' +
+        '<div class="hint">' + escapeHtml(info) + '</div></div>' +
+        '<input data-sbc="max" inputmode="numeric" placeholder="até" value="' + (p.max > 0 ? p.max : '') + '">' +
+        '</div>';
+    }
+
+    function renderSbc() {
+      const s = app.state.sbc;
+      el('sbcActions').hidden = !s;
+      el('sbcResume').hidden = !app.state.targets.some((t) => t.pausedForSbc);
+      if (!s) {
+        el('sbcList').innerHTML = '<p class="hint">Nenhuma solução importada ainda.</p>';
+        return;
+      }
+      el('sbcList').innerHTML = '<p class="captured"><b>' + escapeHtml(s.name) + '</b> · ' + s.players.length + ' jogadores · importado em ' +
+        new Date(s.at).toLocaleString('pt-BR') + '</p>' +
+        '<div class="sbc-row sbc-head"><span>Comprar</span><span>Jogador</span><span>Pagar até</span></div>' +
+        s.players.map(sbcRowHtml).join('');
+      renderSbcTotal();
+    }
+
+    function renderSbcTotal() {
+      const s = app.state.sbc;
+      if (!s) return;
+      const buy = s.players.filter((p) => p.buy);
+      const total = buy.reduce((n, p) => n + (p.max || 0), 0);
+      const missing = buy.filter((p) => !(p.max >= 200)).length;
+      el('sbcTotal').innerHTML = buy.length + ' para comprar · até <b>' + fmt(total) + '</b> moedas' +
+        (missing ? ' · <span class="neg">' + missing + ' sem preço máximo (mínimo 200)</span>' : '');
+    }
+
+    function onSbcInput(e) {
+      const row = e.target.closest('.sbc-row');
+      const s = app.state.sbc;
+      if (!row || !s || !e.target.dataset.sbc) return;
+      const p = s.players[parseInt(row.dataset.i, 10)];
+      if (!p) return;
+      if (e.target.dataset.sbc === 'buy') p.buy = e.target.checked;
+      if (e.target.dataset.sbc === 'max') p.max = parseCoins(e.target.value);
+      save();
+      renderSbcTotal();
+    }
+
+    async function sbcCheckClub(btn) {
+      const s = app.state.sbc;
+      if (!s) return;
+      if (modBusy || engine.running) return win.alert('Pare o bot/módulo antes de conferir o clube.');
+      modBusy = 'sbc';
+      btn.disabled = true;
+      btn.textContent = 'Conferindo…';
+      try {
+        const ids = s.players.map((p) => p.definitionId);
+        const found = new Map();
+        let club;
+        try { club = await adapter.clubOwned(ids, deps.lookup); } catch (e) { club = { success: false, status: e.message, owned: new Set() }; }
+        club.owned.forEach((id) => found.set(id, 'no clube'));
+        for (const w of ['unassigned', 'transfer']) {
+          let r = null;
+          try { r = await readPile(w); } catch (e) { r = null; }
+          if (!r || !r.ok) continue;
+          r.items.forEach((it) => {
+            if (ids.includes(it.definitionId) && !found.has(it.definitionId)) found.set(it.definitionId, w === 'unassigned' ? 'em Não atribuídos' : 'na lista de transferências');
+          });
+        }
+        s.players.forEach((p) => {
+          p.owned = found.get(p.definitionId) || '';
+          if (p.owned) p.buy = false;
+        });
+        save();
+        renderSbc();
+        log('SBC: você já tem ' + found.size + ' de ' + ids.length + ' jogador(es)' + (club.success ? '.' :
+          '. Não deu para ler o clube (' + (club.missing ? 'função não encontrada' : club.status) + '); conferi só Não atribuídos e a lista de transferências.'),
+        club.success ? 'success' : 'warn');
+      } finally {
+        modBusy = '';
+        btn.disabled = false;
+        btn.textContent = '🏠 Conferir no clube';
+      }
+    }
+
+    function sbcPrices(btn) {
+      if (modBusy === 'preços') { modStop = true; log('Parando a consulta de preços…', 'warn'); return; }
+      const s = app.state.sbc;
+      if (!s) return;
+      const cards = s.players.filter((p) => p.buy).map((p) => ({ name: p.name, definitionId: p.definitionId, rating: p.rating }));
+      if (!cards.length) return win.alert('Marque pelo menos um jogador.');
+      const label = btn.textContent;
+      checkPrices(cards, {
+        quiet: cards.length > 1,
+        onUpdate: renderSbc,
+        progress: (t) => { btn.textContent = t ? 'Consultando ' + t + ' (toque para parar)' : label; },
+      }).then(renderSbc);
+    }
+
+    function sbcUseNow() {
+      const s = app.state.sbc;
+      if (!s) return;
+      let n = 0;
+      s.players.forEach((p) => {
+        const m = deps.market && deps.market.get(p.definitionId);
+        if (p.buy && m && m.price > 0) { p.max = m.price; n++; }
+      });
+      save();
+      renderSbc();
+      if (!n) win.alert('Nenhum preço atual consultado ainda. Toque em "💲 Preço atual dos marcados" antes.');
+    }
+
+    function sbcCreateTargets() {
+      const s = app.state.sbc;
+      if (!s) return;
+      const buy = s.players.filter((p) => p.buy);
+      if (!buy.length) return win.alert('Marque pelo menos um jogador para comprar.');
+      const bad = buy.filter((p) => !(p.max >= 200));
+      if (bad.length) return win.alert('Informe quanto pagar (mínimo 200) por: ' + bad.map((p) => p.name).join(', ') + '.');
+      const active = (p) => app.state.targets.some((t) => t.sbc && t.definitionId === p.definitionId && !targetDone(t));
+      const fresh = buy.filter((p) => !active(p));
+      const already = buy.length - fresh.length;
+      if (!fresh.length) return win.alert('Esses jogadores já estão no sniper.');
+      const pauseOthers = el('sbcPauseOthers').checked;
+      const total = fresh.reduce((n, p) => n + p.max, 0);
+      if (!win.confirm('Criar ' + fresh.length + ' alvo(s) no sniper (1 carta de cada, sem revenda):\n\n' +
+        fresh.map((p) => p.name + ' ' + p.rating + ' até ' + fmt(p.max)).join('\n') +
+        '\n\nTotal: até ' + fmt(total) + ' moedas.' +
+        (already ? '\n(' + already + ' já estavam no sniper.)' : '') +
+        (pauseOthers ? '\nSeus outros alvos serão pausados.' : '') +
+        (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
+      if (pauseOthers) {
+        app.state.targets.forEach((t) => {
+          if (!t.sbc && t.enabled) { t.enabled = false; t.pausedForSbc = true; }
+        });
+      }
+      const now = Date.now();
+      fresh.forEach((p) => app.state.targets.push(sbcTarget(p, s.name, p.max, now)));
+      save();
+      renderTargets();
+      renderSbc();
+      log('SBC ' + s.name + ': ' + fresh.length + ' alvo(s) criado(s), até ' + fmt(total) + ' moedas.', 'success');
+      win.alert('Alvos criados. Toque em Iniciar para o sniper comprar. Cada alvo do SBC se desliga sozinho quando a carta é comprada; as cartas ficam em Não atribuídos.');
+    }
+
+    function sbcResume() {
+      let n = 0;
+      app.state.targets.forEach((t) => {
+        if (t.pausedForSbc) { t.enabled = true; delete t.pausedForSbc; n++; }
+      });
+      save();
+      renderTargets();
+      renderSbc();
+      log(n + ' alvo(s) reativado(s).', 'success');
+    }
+
+    function sbcClear() {
+      const s = app.state.sbc;
+      const mine = app.state.targets.filter((t) => t.sbc && (!s || t.sbc === s.name));
+      if (!mine.length) return win.alert('Não há alvos deste SBC no sniper.');
+      if (!win.confirm('Remover ' + mine.length + ' alvo(s) do SBC do sniper?')) return;
+      app.state.targets = app.state.targets.filter((t) => !mine.includes(t));
+      save();
+      renderTargets();
+      renderSbc();
+    }
+
     // Venda: carrega, agrupa e mostra cada grupo com quantidade e preço.
     async function loadSellable() {
       if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
@@ -3935,6 +4183,14 @@
           if (g) checkSellPrices([g], null);
         }
         if (a === 'sellPrices') checkSellPrices(sellGroups, act);
+        if (a === 'sbcPaste') pasteSbc();
+        if (a === 'sbcImport') importSbc(el('sbcCode').value);
+        if (a === 'sbcClub') sbcCheckClub(act);
+        if (a === 'sbcPrices') sbcPrices(act);
+        if (a === 'sbcUseNow') sbcUseNow();
+        if (a === 'sbcCreate') sbcCreateTargets();
+        if (a === 'sbcResume') sbcResume();
+        if (a === 'sbcClear') sbcClear();
         if (a === 'modStop') { modStop = true; log('Parando o módulo…', 'warn'); }
         return;
       }
@@ -4002,6 +4258,9 @@
         renderTargets();
       }
     });
+
+    el('sbcList').addEventListener('input', onSbcInput);
+    el('sbcList').addEventListener('change', onSbcInput);
 
     panel.addEventListener('input', (e) => {
       const card = e.target.closest('.sg');
@@ -4115,6 +4374,241 @@
   }
 
   // ---------------------------------------------------------------------------
+  // SBC: solução do FUTBIN → alvos do sniper
+  // ---------------------------------------------------------------------------
+
+  const SBC_PREFIX = 'FCAB-SBC1:';
+  const SBC_POSITIONS = ['GK', 'RWB', 'LWB', 'RB', 'LB', 'CB', 'CDM', 'CM', 'CAM', 'RM', 'LM', 'RW', 'LW', 'RF', 'LF', 'CF', 'ST'];
+  const STAT_LABELS = /^(PAC|SHO|PAS|DRI|DEF|PHY|DIV|HAN|KIC|REF|SPD|POS|RAT|CHEM|RAT\.)$/i;
+
+  // A solução viaja do FUTBIN para o Web App como texto (área de transferência).
+  function encodeSbc(sbc) {
+    const json = JSON.stringify(sbc);
+    return SBC_PREFIX + btoa(unescape(encodeURIComponent(json)));
+  }
+
+  function decodeSbc(text) {
+    const s = String(text || '');
+    const i = s.indexOf(SBC_PREFIX);
+    if (i < 0) return { error: 'não achei o código da solução (ele começa com ' + SBC_PREFIX + ')' };
+    const b64 = s.slice(i + SBC_PREFIX.length).match(/^[A-Za-z0-9+/=]+/);
+    try {
+      const data = JSON.parse(decodeURIComponent(escape(atob(b64 ? b64[0] : ''))));
+      const players = (Array.isArray(data.players) ? data.players : []).filter((p) => p && p.definitionId > 0);
+      if (!players.length) return { error: 'o código não tem jogadores' };
+      return {
+        sbc: {
+          name: String(data.name || 'SBC'),
+          url: String(data.url || ''),
+          total: data.total > 0 ? data.total : 0,
+          at: data.at || Date.now(),
+          players: players.map((p) => ({
+            definitionId: p.definitionId,
+            name: String(p.name || 'Jogador'),
+            rating: p.rating > 0 ? p.rating : 0,
+            position: String(p.position || ''),
+            price: p.price > 0 ? p.price : 0,
+            pcPrice: p.pcPrice > 0 ? p.pcPrice : 0,
+          })),
+        },
+      };
+    } catch (e) {
+      return { error: 'código incompleto ou corrompido (copie de novo no FUTBIN)' };
+    }
+  }
+
+  // ID da carta na imagem do FUTBIN: .../players/231747.png ou .../players/p50563427.png
+  function futbinImageId(url) {
+    const m = String(url || '').match(/\/players\/(?:p)?(\d{3,10})\.(?:png|webp|jpe?g)/i);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function imageUrlsOf(node) {
+    const urls = [];
+    if (node.getAttribute) {
+      ['src', 'data-src', 'data-original', 'data-lazy-src', 'srcset', 'data-srcset'].forEach((a) => {
+        const v = node.getAttribute(a);
+        if (v) urls.push(v);
+      });
+      const st = node.getAttribute('style');
+      if (st) urls.push(st);
+    }
+    return urls;
+  }
+
+  function playerIdOf(node) {
+    for (const u of imageUrlsOf(node)) {
+      const id = futbinImageId(u);
+      if (id) return id;
+    }
+    return 0;
+  }
+
+  // Lê as cartas da página de solução do FUTBIN. A página não tem um formato
+  // documentado, então procura as fotos dos jogadores e lê o texto em volta.
+  function parseSbcCards(root) {
+    const photos = Array.from(root.querySelectorAll('img, [style*="/players/"]')).filter((n) => playerIdOf(n) > 0);
+    const countIn = (el) => photos.filter((p) => el.contains(p)).length;
+    const seen = new Set();
+    const cards = [];
+    for (const photo of photos) {
+      // Sobe até o maior bloco que ainda contém só esta foto: é a carta.
+      let card = photo;
+      while (card.parentElement && card.parentElement !== root && countIn(card.parentElement) === 1) card = card.parentElement;
+      if (seen.has(card)) continue;
+      seen.add(card);
+      const p = readSbcCard(card, playerIdOf(photo));
+      if (p) cards.push(p);
+    }
+    return cards;
+  }
+
+  function textTokens(el) {
+    const text = (el.innerText != null && el.innerText !== '' ? el.innerText : el.textContent) || '';
+    return text.split(/[\n\r\t]+|\s{2,}/).map((t) => t.trim()).filter(Boolean);
+  }
+
+  function readSbcCard(card, definitionId) {
+    const tokens = textTokens(card);
+    const words = [];
+    tokens.forEach((t) => t.split(/\s+/).forEach((w) => words.push(w)));
+    let rating = 0;
+    let position = '';
+    const prices = [];
+    for (const w of words) {
+      const up = w.toUpperCase();
+      if (!position && SBC_POSITIONS.includes(up)) { position = up; continue; }
+      if (/^\d{2}$/.test(w)) {
+        const n = parseInt(w, 10);
+        if (!rating && n >= 40 && n <= 99) rating = n;
+        continue;
+      }
+      // Preços: 650, 1,200, 12.5K, 1.2M (as notas e atributos têm 2 dígitos).
+      if (/^\d{1,3}([.,]\d{3})+$|^\d{3,}$|^\d+([.,]\d+)?[KkMm]$/.test(w)) {
+        const v = parseShortPrice(w);
+        if (v >= 150) prices.push(v);
+      }
+    }
+    // Preço por atributo data-*, quando a página informa.
+    let attrPrice = 0;
+    let attrPc = 0;
+    const nodes = [card].concat(Array.from(card.querySelectorAll('*')));
+    for (const n of nodes) {
+      for (const a of Array.from(n.attributes || [])) {
+        if (!/price/i.test(a.name)) continue;
+        const v = parseShortPrice(a.value);
+        if (!(v >= 150)) continue;
+        if (/pc/i.test(a.name)) attrPc = attrPc || v;
+        else if (/ps|console|xbox|xb/i.test(a.name)) attrPrice = attrPrice || v;
+      }
+    }
+    const name = sbcCardName(card, tokens);
+    if (!definitionId || !rating) return null;
+    return {
+      definitionId,
+      name,
+      rating,
+      position,
+      // Na tela de preços o FUTBIN mostra console primeiro e PC depois.
+      price: attrPrice || prices[0] || 0,
+      pcPrice: attrPc || prices[1] || 0,
+    };
+  }
+
+  function sbcCardName(card, tokens) {
+    const byClass = card.querySelector('[class*="name" i]');
+    if (byClass && byClass.textContent.trim() && !/^\d+$/.test(byClass.textContent.trim())) return byClass.textContent.trim();
+    const alt = Array.from(card.querySelectorAll('img[alt], img[title]')).map((i) => i.getAttribute('alt') || i.getAttribute('title'))
+      .find((t) => t && /[A-Za-zÀ-ÿ]{2}/.test(t) && !/futbin|coin|icon|logo|club|nation|league|flag|badge/i.test(t));
+    const words = tokens.filter((t) => /[A-Za-zÀ-ÿ]{2}/.test(t) && !SBC_POSITIONS.includes(t.toUpperCase()) &&
+      !t.split(/\s+/).every((w) => STAT_LABELS.test(w)));
+    return (words[0] || alt || 'Jogador').trim();
+  }
+
+  function sbcTitle(doc) {
+    const crumbs = Array.from(doc.querySelectorAll('[class*="breadcrumb" i] a, [class*="breadcrumb" i] li, nav a'))
+      .map((a) => a.textContent.trim()).filter(Boolean);
+    const last = crumbs.length ? crumbs[crumbs.length - 1] : '';
+    if (last && !/^home$/i.test(last)) return last;
+    return (doc.title || 'SBC').replace(/\s*[-|–]\s*FUTBIN.*$/i, '').trim();
+  }
+
+  // Alvo do sniper para um jogador da solução: só aquela versão e aquela nota,
+  // uma carta, sem revenda (fica em Não atribuídos para o SBC).
+  function sbcTarget(p, sbcName, maxBuy, now) {
+    return {
+      id: (now || Date.now()).toString(36) + '-' + p.definitionId,
+      name: 'SBC ' + sbcName + ': ' + p.name + (p.rating ? ' ' + p.rating : ''),
+      kind: 'player',
+      criteria: { type: 'player', maskedDefId: baseDefId(p.definitionId) },
+      labels: { player: p.name },
+      playStyles: [],
+      definitionId: p.definitionId,
+      maxCount: 1,
+      bought: 0,
+      minRating: p.rating || 0,
+      maxRating: p.rating || 0,
+      maxBuy,
+      sellPrice: 0,
+      enabled: true,
+      sbc: sbcName,
+      card: { name: p.name, definitionId: p.definitionId, rating: p.rating },
+    };
+  }
+
+  // Botão "Enviar ao bot" nas páginas do FUTBIN.
+  function bootFutbin(win) {
+    const doc = win.document;
+    const btn = doc.createElement('button');
+    btn.textContent = '🧩 Enviar ao bot';
+    btn.style.cssText = 'position:fixed;left:12px;bottom:90px;z-index:2147483646;padding:12px 16px;border:0;border-radius:24px;' +
+      'background:#1db954;color:#fff;font:700 16px -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);display:none';
+    const box = doc.createElement('div');
+    box.style.cssText = 'position:fixed;left:8px;right:8px;bottom:150px;z-index:2147483646;background:#111;color:#eee;padding:12px;' +
+      'border-radius:12px;font:14px -apple-system,system-ui,sans-serif;max-height:60vh;overflow:auto;display:none;box-shadow:0 2px 12px rgba(0,0,0,.6)';
+    doc.body.appendChild(btn);
+    doc.body.appendChild(box);
+
+    const scan = () => {
+      const n = parseSbcCards(doc.body).length;
+      btn.style.display = n >= 3 ? 'block' : 'none';
+    };
+    scan();
+    win.setInterval(scan, 2000);
+
+    async function copy(text) {
+      try {
+        await win.navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function show(html) {
+      box.innerHTML = html + '<p><button data-close style="padding:8px 14px;border-radius:8px;border:0">Fechar</button></p>';
+      box.style.display = 'block';
+      box.querySelector('[data-close]').onclick = () => { box.style.display = 'none'; };
+    }
+
+    btn.addEventListener('click', async () => {
+      const players = parseSbcCards(doc.body);
+      const total = players.reduce((n, p) => n + (p.price || 0), 0);
+      const sbc = { name: sbcTitle(doc), url: win.location.href, total, at: Date.now(), players };
+      const code = encodeSbc(sbc);
+      const ok = await copy(code);
+      const noPrice = players.filter((p) => !p.price).length;
+      const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+      show('<b>' + esc(sbc.name) + '</b>: ' + players.length + ' jogador(es)<br>' +
+        players.map((p) => esc(p.name + ' ' + p.rating + ' ' + p.position) + ' — ' + (p.price ? fmt(p.price) : 'sem preço')).join('<br>') +
+        (noPrice ? '<p>⚠️ ' + noPrice + ' sem preço. Toque no selo verde do FUTBIN até aparecerem os preços e toque em "Enviar ao bot" de novo.</p>' : '') +
+        (ok ? '<p>✅ Copiado. Agora abra o Web App da EA → ⚡ → aba 🧩 SBC → <b>Colar solução</b>.</p>'
+          : '<p>Não consegui copiar sozinho. Toque e segure no código abaixo → Selecionar tudo → Copiar:</p>') +
+        '<textarea readonly style="width:100%;height:70px;font-size:11px">' + esc(code) + '</textarea>');
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Inicialização
   // ---------------------------------------------------------------------------
 
@@ -4220,7 +4714,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 
@@ -4229,6 +4723,7 @@
   } else if (typeof window !== 'undefined' && window.document) {
     if (window.__fcabLoaded) return;
     window.__fcabLoaded = true;
-    boot(window);
+    if (/(^|\.)futbin\.com$/i.test(window.location.hostname)) bootFutbin(window);
+    else boot(window);
   }
 })();

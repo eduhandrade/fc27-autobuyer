@@ -41,6 +41,17 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
 
 Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 
+## SBC pela solução do FUTBIN (aba 🧩 SBC)
+O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts). Ele não busca nada no FUTBIN sozinho: só lê a página que você abriu.
+1. No FUTBIN, abra o SBC e a **solução mais barata**. Toque no selo verde até aparecerem os **preços** (o script usa o preço de console, a primeira linha).
+2. Toque no botão verde **🧩 Enviar ao bot** (canto inferior esquerdo). Ele mostra os jogadores lidos e copia um código.
+3. No Web App da EA: ⚡ → aba **🧩 SBC** → **📋 Colar solução do FUTBIN** (se o Safari não deixar colar sozinho, toque e segure no campo → Colar → **Importar código colado**).
+4. Confira a lista: desmarque quem não quer comprar e ajuste **Pagar até**. Opcional: **🏠 Conferir no clube** (marca quem você já tem), **💲 Preço atual dos marcados** e **Usar o preço atual como "pagar até"**.
+5. **🎯 Criar alvos no sniper**: um alvo por jogador, 1 carta, **só aquela versão e aquela nota**, sem revenda (a carta fica em Não atribuídos). Se quiser, seus outros alvos ficam pausados até você tocar em **Reativar meus alvos pausados**.
+6. Toque em **Iniciar**. Cada alvo do SBC se desliga sozinho quando a carta é comprada.
+
+Para o script funcionar no FUTBIN, o Userscripts precisa ter permissão em futbin.com (Ajustes → Safari → Extensões → Userscripts → Outros sites: Permitir).
+
 ## Lucro, lances e venda (abas 💰 Lucro, 🔨 Lances e 🏷️ Vender)
 - **Lucro:** cada compra do bot entra no registro com o preço pago. Compras antigas entram pelo "Item bought for" quando a carta está na lista de transferências ou em Não atribuídos (botão *Atualizar*, ou automaticamente sempre que você abre a lista de transferências no Web App). Quando a carta aparece como vendida, o lucro é calculado: venda − 5% da EA − preço pago. Cartas vendidas e já removidas com "Limpar vendidos" antes do registro não dá para recuperar. O registro fica salvo no navegador e vai acumulando (limpar a lista de transferências não apaga nada). Dá para filtrar por período (hoje, 7 dias, 30 dias, este mês, mês passado, tudo ou datas escolhidas) e ver o lucro por dia; a data da venda é quando o script viu a carta como vendida.
 - **Lances em massa:** escolha um alvo (ou a última busca do mercado), o lance máximo por carta, quantos lances e em quanto tempo os leilões devem terminar. O bot busca os leilões que terminam primeiro, dá o menor lance aceito e confere tipo/filtros da carta antes. *Conferir lances* move as cartas ganhas para a lista de transferências e registra o custo.

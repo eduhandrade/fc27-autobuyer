@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.4.0
+// @version      1.4.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.4.0';
+  const SCRIPT_VERSION = '1.4.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2499,6 +2499,34 @@
         }
       },
 
+      // Filtros escolhidos agora na tela de busca do Web App (mesmo sem tocar
+      // em Search): procura o controlador da tela que guarda os critérios.
+      screenCriteria() {
+        try {
+          const main = G('getAppMain');
+          if (typeof main !== 'function') return null;
+          const queue = [main().getRootViewController()];
+          const seen = new Set();
+          while (queue.length && seen.size < 60) {
+            const c = queue.shift();
+            if (!c || typeof c !== 'object' || seen.has(c)) continue;
+            seen.add(c);
+            const vm = c._viewmodel || c.viewmodel || c._viewModel;
+            if (vm && vm.searchCriteria) return serializeCriteria(vm.searchCriteria);
+            if (c.searchCriteria && typeof c.searchCriteria === 'object') return serializeCriteria(c.searchCriteria);
+            for (const fn of ['getPresentedViewController', 'getCurrentViewController', 'getCurrentController']) {
+              try { if (typeof c[fn] === 'function') queue.push(c[fn]()); } catch (e) { /* ignora */ }
+            }
+            for (const k of ['childViewControllers', '_childViewControllers', 'currentController', '_currentController']) {
+              const v = c[k];
+              if (Array.isArray(v)) v.forEach((x) => queue.push(x));
+              else if (v && typeof v === 'object') queue.push(v);
+            }
+          }
+        } catch (e) { /* tela sem busca */ }
+        return null;
+      },
+
       hookManualSearch(callback) {
         const svc = G('services').Item;
         const original = svc.searchTransferMarket;
@@ -4256,9 +4284,25 @@
       else if (engine.running) log('Aba em segundo plano: o navegador pode pausar o bot.', 'warn');
     });
 
+    // Ao abrir o painel, usa os filtros que estão na tela de busca do Web App
+    // (Players, Managers, Consumables...), mesmo sem ter tocado em Search.
+    let lastScreen = '';
+    function readScreenFilters() {
+      if (engine.running || !adapter.screenCriteria) return;
+      const c = adapter.screenCriteria();
+      if (!c || !kindFromCriteria(c)) return;
+      const key = JSON.stringify(c);
+      if (key === lastScreen) return;
+      lastScreen = key;
+      const same = (a) => a && JSON.stringify(Object.assign({}, a, { maxBuy: 0, minBuy: 0 })) === JSON.stringify(Object.assign({}, c, { maxBuy: 0, minBuy: 0 }));
+      if (same(app.captured)) return;
+      onCaptured(c, null);
+      log('Usei os filtros da tela de busca do Web App no Novo alvo.', 'info');
+    }
+
     toggle.addEventListener('click', () => {
       panel.hidden = !panel.hidden;
-      if (!panel.hidden) { renderStatus(); renderTabs(); refreshStalePrices(); }
+      if (!panel.hidden) { readScreenFilters(); renderStatus(); renderTabs(); refreshStalePrices(); }
     });
 
     panel.addEventListener('click', (e) => {

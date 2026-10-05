@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.3.2
+// @version      1.3.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.3.2';
+  const SCRIPT_VERSION = '1.3.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1719,6 +1719,7 @@
         return this.stop(reached ? 'quantidade de compras dos alvos atingida' : 'nenhum alvo válido e ativo');
       }
       const target = active[this.targetIndex++ % active.length];
+      target.lastTriedAt = Date.now();
 
       const res = await this.adapter.search(buildCriteria(target, this.busterIndex++));
       if (!this.running) return;
@@ -3061,6 +3062,17 @@
       ].map(([k, v]) => '<div>' + k + '<b>' + v + '</b></div>').join('');
     }
 
+    // Na tela, os alvos tentados (ou criados) mais recentemente vêm primeiro.
+    // A ordem em que o bot reveza entre eles não muda.
+    function targetsByRecent(list) {
+      const key = (t) => Math.max(t.lastTriedAt || 0, t.createdAt || 0);
+      return list.slice().sort((a, b) => key(b) - key(a));
+    }
+
+    let lastTouch = 0;
+    ['touchstart', 'touchmove', 'scroll', 'keydown', 'mousedown'].forEach((ev) =>
+      panel.addEventListener(ev, () => { lastTouch = Date.now(); }, { passive: true, capture: true }));
+
     function renderTargets() {
       const box = el('targets');
       editors.forEach((ed, id) => { if (!app.state.targets.some((t) => t.id === id)) editors.delete(id); });
@@ -3068,7 +3080,7 @@
         box.innerHTML = '<p class="hint">Nenhum alvo ainda. Crie um abaixo.</p>';
         return;
       }
-      box.innerHTML = app.state.targets.map((t) => {
+      box.innerHTML = targetsByRecent(app.state.targets).map((t) => {
         const problem = t.needsReview
           ? 'Alvo criado numa versão antiga: confira o tipo e os filtros em ✎ e salve para poder ativar.'
           : targetProblem(t) ? 'Não pode rodar: ' + targetProblem(t) + '.' : '';
@@ -4096,6 +4108,7 @@
         (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       app.state.targets.push({
         id: Date.now().toString(36),
+        createdAt: Date.now(),
         name: el('newName').value.trim() || targetParts(draft, names).join(' ') || summary,
         kind: edited.kind,
         criteria: edited.criteria,
@@ -4411,6 +4424,16 @@
       refreshTargets() {
         renderTargets();
       },
+      // Reordena a lista enquanto o bot roda, mas não enquanto você mexe no painel.
+      reorderTargets() {
+        if (panel.hidden || tab !== 'targets') return;
+        if (Date.now() - lastTouch < 6000) return;
+        const box = el('targets');
+        if (box.contains(doc.activeElement) || box.querySelector('.fe-box:not([hidden])')) return;
+        const order = targetsByRecent(app.state.targets).map((t) => t.id).join();
+        const shown = Array.from(box.querySelectorAll('.tg')).map((n) => n.dataset.id).join();
+        if (order !== shown) renderTargets();
+      },
       refreshFilters() {
         renderNewFilters();
         renderTargets();
@@ -4605,6 +4628,7 @@
       sellPrice: 0,
       enabled: true,
       sbc: sbcName,
+      createdAt: now || Date.now(),
       card: { name: p.name, definitionId: p.definitionId, rating: p.rating },
     };
   }
@@ -4719,6 +4743,8 @@
         if (ui) ui.refreshTargets();
       },
       onSearchResults: (target, items) => {
+        store.save(app.state);
+        if (ui) ui.reorderTargets();
         const c = target.criteria || {};
         if (target.kind !== 'player' || target.card || !(c.maskedDefId || (Array.isArray(c.defId) && c.defId.length))) return;
         const card = cardFromItems(items);

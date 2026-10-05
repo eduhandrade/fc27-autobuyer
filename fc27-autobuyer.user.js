@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.3.4
+// @version      1.4.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.3.4';
+  const SCRIPT_VERSION = '1.4.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -303,7 +303,7 @@
   }
 
   // Tipo do alvo: define o que a busca procura e o que o bot aceita comprar.
-  const KINDS = [['player', 'Jogador'], ['chemstyle', 'Consumível: estilo de química']];
+  const KINDS = [['player', 'Jogador'], ['manager', 'Técnico'], ['chemstyle', 'Consumível: estilo de química']];
 
   function kindLabel(kind) {
     return (KINDS.find((k) => k[0] === kind) || [null, 'tipo não definido'])[1];
@@ -316,6 +316,7 @@
     const type = String(c.type || '').toLowerCase();
     const category = String(c.category || '').toLowerCase();
     if (type === 'player') return 'player';
+    if (type === 'staff' || category === 'manager') return 'manager';
     if (/playstyle|chem/.test(category)) return 'chemstyle';
     if (type === 'training' && c.playStyle > 0) return 'chemstyle';
     return null;
@@ -341,6 +342,19 @@
       PLAYER_ONLY_KEYS.forEach((k) => { delete out[k]; });
       if (style > 0) out.playStyle = style;
       else delete out.playStyle;
+      return out;
+    }
+    if (kind === 'manager') {
+      // Técnicos (aba Managers do Web App): nome, nível, país e liga.
+      const out = kindFromCriteria(base) === 'manager' ? Object.assign({}, base) : {};
+      ['position', 'zone', 'club', 'playStyle', 'rarities', 'defId'].forEach((k) => { delete out[k]; });
+      for (const key of ['level', 'league', 'nation']) {
+        const v = values[key];
+        if (isEmptyValue(v)) delete out[key];
+        else out[key] = NUMERIC_KEYS.includes(key) ? parseInt(v, 10) : v;
+      }
+      out.type = 'staff';
+      out.category = 'manager';
       return out;
     }
     if (kind === 'player') {
@@ -378,7 +392,7 @@
 
   // Motivo para não aceitar o alvo, ou null se está tudo certo.
   function targetProblem(t) {
-    if (!t || !KINDS.some((k) => k[0] === t.kind)) return 'escolha o tipo do alvo (jogador ou consumível)';
+    if (!t || !KINDS.some((k) => k[0] === t.kind)) return 'escolha o tipo do alvo (jogador, técnico ou consumível)';
     const c = t.criteria || {};
     if (t.kind === 'chemstyle') {
       if (!(c.playStyle > 0)) return 'escolha qual estilo de química (consumível) comprar';
@@ -387,6 +401,12 @@
     if (t.kind === 'player') {
       if (kindFromCriteria(c) !== 'player') return 'a busca não é de jogador';
       if (!hasPlayerFilter(c, t)) return 'escolha um jogador ou pelo menos um filtro';
+    }
+    if (t.kind === 'manager') {
+      if (kindFromCriteria(c) !== 'manager') return 'a busca não é de técnico';
+      if (!(c.maskedDefId > 0) && ['level', 'league', 'nation'].every((k) => isEmptyValue(c[k]))) {
+        return 'escolha um técnico ou pelo menos um filtro (nível, país ou liga)';
+      }
     }
     if (!(t.maxBuy >= 200)) return 'preço máximo de compra precisa ser pelo menos 200';
     return null;
@@ -411,6 +431,16 @@
       if (it.kind !== 'training') return 'não é consumível';
       if (it.playStyle != null && it.playStyle > 0) return it.playStyle === c.playStyle ? null : 'estilo de química diferente';
       return isChemStyleName(it.name, c.playStyle) ? null : 'não deu para confirmar o estilo do consumível';
+    }
+    if (target.kind === 'manager') {
+      if (it.kind !== 'manager') return 'não é técnico';
+      if (c.maskedDefId > 0 && it.definitionId > 0 && baseDefId(it.definitionId) !== baseDefId(c.maskedDefId)) return 'outro técnico';
+      const needM = (want, got, article, noun) => {
+        if (isEmptyValue(want)) return null;
+        if (got == null) return 'não deu para confirmar ' + article + ' ' + noun;
+        return got === want ? null : noun + ' diferente';
+      };
+      return needM(c.league, it.leagueId, 'a', 'liga') || needM(c.nation, it.nationId, 'o', 'país');
     }
     if (target.kind === 'player') {
       if (it.kind !== 'player') return 'não é jogador';
@@ -462,7 +492,7 @@
     const labels = t.labels || {};
     if (t.kind === 'chemstyle') return [c.playStyle > 0 ? 'Estilo ' + chemStyleName(c.playStyle) : 'Estilo ?'];
     const parts = [];
-    if (c.maskedDefId) parts.push(nameFor('player', c.maskedDefId, labels, names));
+    if (c.maskedDefId) parts.push(t.kind === 'manager' ? (labels.player || 'técnico #' + c.maskedDefId) : nameFor('player', c.maskedDefId, labels, names));
     if (c.position && c.position !== 'any') parts.push(c.position);
     if (!isEmptyValue(c.zone)) parts.push(zoneLabel(c.zone));
     if (c.playStyle > 0) parts.push('Química ' + chemStyleName(c.playStyle));
@@ -484,7 +514,8 @@
   function describeTarget(t, names) {
     if (t.kind === 'chemstyle') return 'CONSUMÍVEL · ' + targetParts(t, names).join(' · ');
     const parts = targetParts(t, names);
-    return (t.kind === 'player' ? 'JOGADOR · ' : 'TIPO NÃO DEFINIDO · ') + (parts.join(' · ') || 'sem filtros');
+    const head = t.kind === 'player' ? 'JOGADOR · ' : t.kind === 'manager' ? 'TÉCNICO · ' : 'TIPO NÃO DEFINIDO · ';
+    return head + (parts.join(' · ') || 'sem filtros');
   }
 
   function describeCriteria(c) {
@@ -2286,6 +2317,13 @@
     try { if (typeof raw.isPlayer === 'function') isPlayer = !!raw.isPlayer(); } catch (e) { isPlayer = null; }
     if (isPlayer === true) return 'player';
     if (type === 'player') return isPlayer === false ? null : 'player';
+    if (type === 'staff' || type === 'manager') {
+      let isManager = null;
+      try { if (typeof raw.isManager === 'function') isManager = !!raw.isManager(); } catch (e) { isManager = null; }
+      const cat = String(raw.category != null ? raw.category : '').toLowerCase();
+      if (isManager === false || (cat && !/manager/.test(cat))) return 'staff';
+      return 'manager';
+    }
     if (type === 'training') return 'training';
     try { if (typeof raw.isTraining === 'function' && raw.isTraining()) return 'training'; } catch (e) { /* ignora */ }
     return type || null;
@@ -3117,6 +3155,7 @@
         const done = targetDone(t);
         const kindPill = t.kind === 'chemstyle' ? '<span class="pill pill-chem">Consumível</span>'
           : t.kind === 'player' ? '<span class="pill pill-player">Jogador</span>'
+          : t.kind === 'manager' ? '<span class="pill pill-player">Técnico</span>'
           : '<span class="pill pill-none">Sem tipo</span>';
         const tags = targetParts(t, names).map((x) => '<span class="tag">' + escapeHtml(x) + '</span>').join('');
         return `
@@ -3207,7 +3246,7 @@
       }
 
       function render() {
-        const short = { player: '👤 Jogador', chemstyle: '🧪 Consumível de química' };
+        const short = { player: '👤 Jogador', manager: '👔 Técnico', chemstyle: '🧪 Consumível de química' };
         const kindSeg = '<div class="seg">' + KINDS.map((k) => chip('data-ed-kind', k[0], short[k[0]], st.kind === k[0])).join('') + '</div>';
         let html = section('O que comprar', kindSeg);
         if (st.kind === 'chemstyle') {
@@ -3241,8 +3280,18 @@
           html += section('Nota', '<div class="grid"><div><label>Mínima</label><input data-ed-num="minRating" inputmode="numeric" value="' +
             (st.minRating || '') + '"></div><div><label>Máxima</label><input data-ed-num="maxRating" inputmode="numeric" value="' +
             (st.maxRating || '') + '"></div></div>');
+        } else if (st.kind === 'manager') {
+          html += section('Técnico', st.player
+            ? '<div class="sel"><span>' + escapeHtml(st.labels.player || 'técnico #' + st.player) + '</span>' +
+              '<button type="button" data-ed-clear="player">✕</button></div>'
+            : '<p class="hint">Qualquer técnico. Para um técnico específico: no Web App vá em Transferências → Managers, ' +
+              'digite o nome, faça a busca e depois toque em <b>Usar última busca</b>.</p>');
+          html += section('Nível', '<div class="chips">' + chip('data-ed-level', '', 'Qualquer', !st.level) +
+            LEVELS.filter((l) => l[0] !== 'SP').map((l) => chip('data-ed-level', l[0], l[1], st.level === l[0])).join('') + '</div>');
+          html += PICKERS.filter((p) => p[0] === 'nation' || p[0] === 'league').map((p) => picker(p[0], p[1], p[2])).join('');
+          html += '<p class="hint">Compra só técnicos. Jogadores e consumíveis são sempre ignorados.</p>';
         } else {
-          html += '<p class="hint">Escolha acima se o alvo é um jogador ou um consumível.</p>';
+          html += '<p class="hint">Escolha acima se o alvo é um jogador, um técnico ou um consumível.</p>';
         }
         host.innerHTML = '<div class="ed">' + html + '</div>';
         PICKERS.forEach((p) => { if (st.query[p[0]]) updateResults(p[0]); });
@@ -3313,6 +3362,7 @@
         value() {
           const kind = st.kind;
           const values = kind === 'chemstyle' ? { playStyle: st.consumable }
+            : kind === 'manager' ? { level: st.level || 'any', league: st.league, nation: st.nation }
             : { position: st.position || 'any', zone: st.position ? 'any' : (st.zone || 'any'), playStyle: st.chem || 0, level: st.level || 'any', club: st.club, league: st.league, nation: st.nation };
           let criteria = kind ? criteriaForKind(kind, st.base, values) : Object.assign({}, st.base);
           const field = psField();
@@ -3323,6 +3373,11 @@
             else delete criteria.maskedDefId;
             if (st.player !== (st.base.maskedDefId || 0)) delete criteria.defId;
             ['player', 'club', 'league', 'nation'].forEach((k) => { if (st[k] && st.labels[k]) labels[k] = st.labels[k]; });
+          }
+          if (kind === 'manager') {
+            if (st.player) criteria.maskedDefId = st.player;
+            else delete criteria.maskedDefId;
+            ['player', 'league', 'nation'].forEach((k) => { if (st[k] && st.labels[k]) labels[k] = st.labels[k]; });
           }
           return {
             kind,
@@ -4109,7 +4164,8 @@
       if (!card) {
         if (!el('newName').value) {
           el('newName').value = kind === 'chemstyle' && criteria.playStyle > 0
-            ? 'Consumível ' + chemStyleName(criteria.playStyle) : parts.join(' ');
+            ? 'Consumível ' + chemStyleName(criteria.playStyle)
+            : (kind === 'manager' ? 'Técnico ' : '') + parts.join(' ');
         }
         return;
       }
@@ -4142,6 +4198,9 @@
       const sameCard = app.capturedCard && edited.criteria.maskedDefId &&
         app.captured && app.captured.maskedDefId === edited.criteria.maskedDefId;
       const card = edited.kind === 'player' && sameCard ? app.capturedCard : null;
+      if (edited.kind === 'manager' && sameCard && app.capturedCard && app.capturedCard.name) {
+        edited.labels = Object.assign({}, edited.labels, { player: app.capturedCard.name });
+      }
       const summary = describeTarget(draft, names);
       const count = parseCoins(el('newCount').value);
       if (!win.confirm('Confirme o alvo:\n\n' + summary + '\nCompra até ' + fmt(maxBuy) +
@@ -4150,7 +4209,7 @@
       app.state.targets.push({
         id: Date.now().toString(36),
         createdAt: Date.now(),
-        name: el('newName').value.trim() || targetParts(draft, names).join(' ') || summary,
+        name: el('newName').value.trim() || (edited.kind === 'manager' ? 'Técnico ' : '') + targetParts(draft, names).join(' ') || summary,
         kind: edited.kind,
         criteria: edited.criteria,
         labels: edited.labels,

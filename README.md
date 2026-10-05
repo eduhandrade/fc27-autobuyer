@@ -41,6 +41,11 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
 
 Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 
+## Sniper de técnicos
+No **Novo alvo**, escolha **👔 Técnico**. Filtros iguais aos da aba *Managers* do Web App: nível (bronze/prata/ouro), país e liga.
+Para um técnico específico: no Web App vá em **Transferências → Managers**, digite o nome, faça a busca e toque em **Usar última busca** (ou crie o alvo logo depois da busca).
+O bot só compra cartas de técnico: jogadores e consumíveis que aparecerem são ignorados, e liga e país são conferidos antes de comprar.
+
 ## SBC pela solução do FUTBIN (aba 🧩 SBC)
 O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts). Ele não busca nada no FUTBIN sozinho: só lê a página que você abriu.
 1. No FUTBIN, abra o SBC e a **solução mais barata**. Toque no selo verde até aparecerem os **preços** (o script usa o preço de console, a primeira linha).

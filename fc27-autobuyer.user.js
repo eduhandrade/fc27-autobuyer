@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.4.1
+// @version      1.5.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.4.1';
+  const SCRIPT_VERSION = '1.5.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -303,7 +303,7 @@
   }
 
   // Tipo do alvo: define o que a busca procura e o que o bot aceita comprar.
-  const KINDS = [['player', 'Jogador'], ['manager', 'Técnico'], ['chemstyle', 'Consumível: estilo de química']];
+  const KINDS = [['player', 'Jogador'], ['manager', 'Técnico'], ['chemstyle', 'Consumível: estilo de química'], ['mgrleague', 'Consumível: liga de técnico']];
 
   function kindLabel(kind) {
     return (KINDS.find((k) => k[0] === kind) || [null, 'tipo não definido'])[1];
@@ -316,6 +316,8 @@
     const type = String(c.type || '').toLowerCase();
     const category = String(c.category || '').toLowerCase();
     if (type === 'player') return 'player';
+    // Consumables → Manager Leagues (liga do técnico).
+    if (/manager/.test(category) && (type === 'training' || /league|modifier/.test(category))) return 'mgrleague';
     if (type === 'staff' || category === 'manager') return 'manager';
     if (/playstyle|chem/.test(category)) return 'chemstyle';
     if (type === 'training' && c.playStyle > 0) return 'chemstyle';
@@ -342,6 +344,16 @@
       PLAYER_ONLY_KEYS.forEach((k) => { delete out[k]; });
       if (style > 0) out.playStyle = style;
       else delete out.playStyle;
+      return out;
+    }
+    if (kind === 'mgrleague') {
+      // Usa a busca do próprio Web App (ela sabe como a EA guarda a liga).
+      const out = kindFromCriteria(base) === 'mgrleague'
+        ? Object.assign({}, base)
+        : { type: 'training', category: 'managerLeagueModifier' };
+      ['position', 'zone', 'club', 'nation', 'playStyle', 'rarities', 'defId', 'maskedDefId'].forEach((k) => { delete out[k]; });
+      const lg = parseInt(values.league, 10);
+      if (lg > 0) out.league = lg;
       return out;
     }
     if (kind === 'manager') {
@@ -402,6 +414,10 @@
       if (kindFromCriteria(c) !== 'player') return 'a busca não é de jogador';
       if (!hasPlayerFilter(c, t)) return 'escolha um jogador ou pelo menos um filtro';
     }
+    if (t.kind === 'mgrleague') {
+      if (kindFromCriteria(c) !== 'mgrleague') return 'a busca não é de liga de técnico (use Consumables → Manager Leagues no Web App)';
+      if (!(c.league > 0)) return 'escolha a liga (no Web App: Consumables → Manager Leagues → liga, e abra o ⚡)';
+    }
     if (t.kind === 'manager') {
       if (kindFromCriteria(c) !== 'manager') return 'a busca não é de técnico';
       if (!(c.maskedDefId > 0) && ['level', 'league', 'nation'].every((k) => isEmptyValue(c[k]))) {
@@ -427,6 +443,15 @@
   // null. Na dúvida (dado que o item não informa), não compra.
   function mismatchReason(it, target) {
     const c = target.criteria || {};
+    if (target.kind === 'mgrleague') {
+      if (it.kind !== 'training') return 'não é consumível';
+      if (it.playStyle != null && it.playStyle > 0) return 'é estilo de química, não liga de técnico';
+      if (c.league > 0) {
+        if (it.leagueId == null) return 'não deu para confirmar a liga do consumível';
+        if (it.leagueId !== c.league) return 'liga diferente';
+      }
+      return null;
+    }
     if (target.kind === 'chemstyle') {
       if (it.kind !== 'training') return 'não é consumível';
       if (it.playStyle != null && it.playStyle > 0) return it.playStyle === c.playStyle ? null : 'estilo de química diferente';
@@ -491,6 +516,7 @@
     const c = t.criteria || {};
     const labels = t.labels || {};
     if (t.kind === 'chemstyle') return [c.playStyle > 0 ? 'Estilo ' + chemStyleName(c.playStyle) : 'Estilo ?'];
+    if (t.kind === 'mgrleague') return ['Liga de técnico: ' + (c.league > 0 ? nameFor('league', c.league, labels, names) : '?')];
     const parts = [];
     if (c.maskedDefId) parts.push(t.kind === 'manager' ? (labels.player || 'técnico #' + c.maskedDefId) : nameFor('player', c.maskedDefId, labels, names));
     if (c.position && c.position !== 'any') parts.push(c.position);
@@ -512,7 +538,7 @@
   }
 
   function describeTarget(t, names) {
-    if (t.kind === 'chemstyle') return 'CONSUMÍVEL · ' + targetParts(t, names).join(' · ');
+    if (t.kind === 'chemstyle' || t.kind === 'mgrleague') return 'CONSUMÍVEL · ' + targetParts(t, names).join(' · ');
     const parts = targetParts(t, names);
     const head = t.kind === 'player' ? 'JOGADOR · ' : t.kind === 'manager' ? 'TÉCNICO · ' : 'TIPO NÃO DEFINIDO · ';
     return head + (parts.join(' · ') || 'sem filtros');
@@ -3181,7 +3207,7 @@
           ? 'Alvo criado numa versão antiga: confira o tipo e os filtros em ✎ e salve para poder ativar.'
           : targetProblem(t) ? 'Não pode rodar: ' + targetProblem(t) + '.' : '';
         const done = targetDone(t);
-        const kindPill = t.kind === 'chemstyle' ? '<span class="pill pill-chem">Consumível</span>'
+        const kindPill = t.kind === 'chemstyle' || t.kind === 'mgrleague' ? '<span class="pill pill-chem">Consumível</span>'
           : t.kind === 'player' ? '<span class="pill pill-player">Jogador</span>'
           : t.kind === 'manager' ? '<span class="pill pill-player">Técnico</span>'
           : '<span class="pill pill-none">Sem tipo</span>';
@@ -3274,7 +3300,7 @@
       }
 
       function render() {
-        const short = { player: '👤 Jogador', manager: '👔 Técnico', chemstyle: '🧪 Consumível de química' };
+        const short = { player: '👤 Jogador', manager: '👔 Técnico', chemstyle: '🧪 Consumível de química', mgrleague: '🏆 Liga de técnico' };
         const kindSeg = '<div class="seg">' + KINDS.map((k) => chip('data-ed-kind', k[0], short[k[0]], st.kind === k[0])).join('') + '</div>';
         let html = section('O que comprar', kindSeg);
         if (st.kind === 'chemstyle') {
@@ -3308,6 +3334,11 @@
           html += section('Nota', '<div class="grid"><div><label>Mínima</label><input data-ed-num="minRating" inputmode="numeric" value="' +
             (st.minRating || '') + '"></div><div><label>Máxima</label><input data-ed-num="maxRating" inputmode="numeric" value="' +
             (st.maxRating || '') + '"></div></div>');
+        } else if (st.kind === 'mgrleague') {
+          html += picker('league', 'Liga do técnico', 'Buscar liga…');
+          html += '<p class="hint">Compra só o consumível de liga de técnico. Jeito mais seguro: no Web App vá em Transferências → ' +
+            'Consumables → <b>Manager Leagues</b>, escolha a liga e abra o ⚡ (os filtros da tela vêm sozinhos). ' +
+            'O bot confere a liga de cada carta e, se não conseguir confirmar, não compra.</p>';
         } else if (st.kind === 'manager') {
           html += section('Técnico', st.player
             ? '<div class="sel"><span>' + escapeHtml(st.labels.player || 'técnico #' + st.player) + '</span>' +
@@ -3390,6 +3421,7 @@
         value() {
           const kind = st.kind;
           const values = kind === 'chemstyle' ? { playStyle: st.consumable }
+            : kind === 'mgrleague' ? { league: st.league }
             : kind === 'manager' ? { level: st.level || 'any', league: st.league, nation: st.nation }
             : { position: st.position || 'any', zone: st.position ? 'any' : (st.zone || 'any'), playStyle: st.chem || 0, level: st.level || 'any', club: st.club, league: st.league, nation: st.nation };
           let criteria = kind ? criteriaForKind(kind, st.base, values) : Object.assign({}, st.base);
@@ -3401,6 +3433,11 @@
             else delete criteria.maskedDefId;
             if (st.player !== (st.base.maskedDefId || 0)) delete criteria.defId;
             ['player', 'club', 'league', 'nation'].forEach((k) => { if (st[k] && st.labels[k]) labels[k] = st.labels[k]; });
+          }
+          if (kind === 'mgrleague') {
+            if (st.league) criteria.league = st.league;
+            else delete criteria.league;
+            if (st.league && st.labels.league) labels.league = st.labels.league;
           }
           if (kind === 'manager') {
             if (st.player) criteria.maskedDefId = st.player;
@@ -4174,6 +4211,8 @@
       }
       const kind = kindFromCriteria(criteria);
       if (kind !== 'player') card = null;
+      // Ajuda a diagnosticar tipos novos: mostra no Log os campos da busca.
+      if (!kind || kind === 'mgrleague') log('Campos da busca capturada: ' + JSON.stringify(criteria), 'info');
       app.captured = criteria;
       app.capturedCard = card || null;
       if (!card) {
@@ -4193,6 +4232,7 @@
         if (!el('newName').value) {
           el('newName').value = kind === 'chemstyle' && criteria.playStyle > 0
             ? 'Consumível ' + chemStyleName(criteria.playStyle)
+            : kind === 'mgrleague' ? parts.join(' ')
             : (kind === 'manager' ? 'Técnico ' : '') + parts.join(' ');
         }
         return;

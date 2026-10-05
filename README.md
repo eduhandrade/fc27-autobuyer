@@ -46,6 +46,10 @@ No **Novo alvo**, escolha **👔 Técnico**. Filtros iguais aos da aba *Managers
 Para um técnico específico: no Web App vá em **Transferências → Managers**, digite o nome, faça a busca e toque em **Usar última busca** (ou crie o alvo logo depois da busca).
 O bot só compra cartas de técnico: jogadores e consumíveis que aparecerem são ignorados, e liga e país são conferidos antes de comprar.
 
+## Consumível: liga de técnico
+No Web App: **Transferências → Consumables → Manager Leagues**, escolha a liga e abra o ⚡ — o Novo alvo vem como **🏆 Liga de técnico** com a liga preenchida (ou escolha à mão no Novo alvo).
+O bot só compra o consumível de liga de técnico: ignora jogadores, técnicos e estilos de química, e confere a liga de cada carta (se não der para confirmar, não compra).
+
 ## SBC pela solução do FUTBIN (aba 🧩 SBC)
 O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts). Ele não busca nada no FUTBIN sozinho: só lê a página que você abriu.
 1. No FUTBIN, abra o SBC e a **solução mais barata**. Toque no selo verde até aparecerem os **preços** (o script usa o preço de console, a primeira linha).

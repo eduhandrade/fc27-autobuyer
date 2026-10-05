@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.3.0
+// @version      1.3.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.3.0';
+  const SCRIPT_VERSION = '1.3.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -60,6 +60,12 @@
     const p = roundDown(price);
     if (p < price) return p;
     return clampPrice(p - stepAt(p - 1));
+  }
+
+  // Um degrau acima (dir 1) ou abaixo (dir -1) na escada de preços da EA.
+  function stepPrice(price, dir) {
+    if (!(price > 0)) return dir > 0 ? MIN_PRICE : 0;
+    return dir > 0 ? nextPrice(price) : prevPrice(price);
   }
 
   function netAfterTax(sellPrice) {
@@ -2694,6 +2700,9 @@
 #fcab-panel .rows .r div:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #fcab-panel .sg-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
 #fcab-panel .sg-count{font-size:13px;background:#12344d;color:#6fc3ff;border-radius:999px;padding:2px 8px;white-space:nowrap}
+#fcab-panel .stepper{display:flex;gap:4px;align-items:stretch}
+#fcab-panel .stepper input{min-width:0;flex:1;text-align:center}
+#fcab-panel .stepper button{flex:none;width:36px;padding:0;font-size:20px;font-weight:700}
 #fcab-panel .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
 #fcab-panel .result{background:#12151a;border-radius:8px;padding:8px;font-size:12px;margin-top:8px}
 #fcab-panel .result[hidden]{display:none}
@@ -2853,8 +2862,8 @@
             <label>Nome (só pra você identificar)</label>
             <input data-el="newName" placeholder="Ex.: Zagueiro Shadow">
             <div class="grid">
-              <div><label>Compra até</label><input data-el="newMax" inputmode="numeric" placeholder="Ex.: 5000"></div>
-              <div><label>Revende por (opcional)</label><input data-el="newSell" inputmode="numeric" placeholder="vazio = não revende"></div>
+              <div><label>Compra até</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="newMax" inputmode="numeric" placeholder="Ex.: 5000"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
+              <div><label>Revende por (opcional)</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="newSell" inputmode="numeric" placeholder="vazio = não revende"><button type="button" data-step="+" data-from="[data-el=newMax]" aria-label="Aumentar">+</button></div></div>
             </div>
             <label>Quantas cartas comprar</label>
             <input data-el="newCount" inputmode="numeric" placeholder="vazio = sem limite">
@@ -3078,8 +3087,8 @@
           <div class="fe-box" hidden></div>
           ${t.kind === 'player' ? '<div class="fb">' + futbinLine(t) + '</div>' : ''}
           <div class="grid">
-            <div><label>Compra até</label><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"></div>
-            <div><label>Revende por</label><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"></div>
+            <div><label>Compra até</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
+            <div><label>Revende por</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"><button type="button" data-step="+" data-from="[data-f=maxBuy]" aria-label="Aumentar">+</button></div></div>
             <div><label>Quantidade</label><input data-f="maxCount" inputmode="numeric" placeholder="sem limite" value="${t.maxCount > 0 ? t.maxCount : ''}"></div>
             <div class="count"><label>Progresso</label><div><b>${escapeHtml(countLabel(t))}</b>${t.bought ? ' <button data-f="resetCount">Zerar</button>' : ''}</div></div>
           </div>
@@ -4114,6 +4123,21 @@
     });
 
     panel.addEventListener('click', (e) => {
+      // Botões − e +: sobem/descem um degrau de preço da EA (como no app).
+      const stepBtn = e.target.closest('[data-step]');
+      if (stepBtn) {
+        const input = stepBtn.parentElement.querySelector('input');
+        let cur = parseCoins(input.value);
+        if (!cur && stepBtn.dataset.from) {
+          const from = stepBtn.closest('.grid, .card, section').querySelector(stepBtn.dataset.from);
+          cur = from ? parseCoins(from.value) : 0;
+        }
+        const next = stepPrice(cur, stepBtn.dataset.step === '+' ? 1 : -1);
+        if (!next) return;
+        input.value = next;
+        input.dispatchEvent(new win.Event('change', { bubbles: true }));
+        return;
+      }
       const periodBtn = e.target.closest('[data-period]');
       if (periodBtn) {
         periodName = periodBtn.dataset.period;
@@ -4714,7 +4738,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, stepPrice, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

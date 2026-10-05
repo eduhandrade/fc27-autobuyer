@@ -77,3 +77,14 @@ test('store mistura configuração salva com padrões', () => {
   assert.equal(st.targets.length, 1);
   assert.deepEqual(st.history, []);
 });
+
+test('botões − e + seguem a escada de preços da EA', () => {
+  const ab2 = require('../fc27-autobuyer.user.js');
+  assert.equal(ab2.stepPrice(26000, 1), 26250);
+  assert.equal(ab2.stepPrice(26000, -1), 25750);
+  assert.equal(ab2.stepPrice(10000, -1), 9900);
+  assert.equal(ab2.stepPrice(950, 1), 1000);
+  assert.equal(ab2.stepPrice(150, -1), 150);
+  assert.equal(ab2.stepPrice(0, 1), 150);
+  assert.equal(ab2.stepPrice(0, -1), 0);
+});

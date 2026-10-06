@@ -41,6 +41,11 @@ A ponte existe porque o navegador não deixa a página da EA ler dados do futbin
 
 Cartas compradas sem preço de revenda ficam em **Não atribuídos**.
 
+## Busca por nota ("over") e preço mínimo da busca
+O mercado da EA não filtra por nota: o bot busca com os filtros da EA e só compra se a carta tiver a **Nota mínima** do alvo.
+Como cada busca traz só ~20 anúncios, use **Buscar a partir de** para deixar de fora as cartas baratas.
+Ex.: qualquer ouro 85+ por até 2.400 → Jogador vazio, Nível **Ouro**, Nota mínima **85**, Compra até **2400**, Buscar a partir de **1800**.
+
 ## Sniper de técnicos
 No **Novo alvo**, escolha **👔 Técnico**. Filtros iguais aos da aba *Managers* do Web App: nível (bronze/prata/ouro), país e liga.
 Para um técnico específico: no Web App vá em **Transferências → Managers**, digite o nome, faça a busca e toque em **Usar última busca** (ou crie o alvo logo depois da busca).

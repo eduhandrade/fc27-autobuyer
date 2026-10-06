@@ -88,3 +88,17 @@ test('botões − e + seguem a escada de preços da EA', () => {
   assert.equal(ab2.stepPrice(0, 1), 150);
   assert.equal(ab2.stepPrice(0, -1), 0);
 });
+
+test('"Buscar a partir de" vira o preço mínimo da busca, variando poucos degraus', () => {
+  const ab2 = require('../fc27-autobuyer.user.js');
+  const t = { criteria: { type: 'player', level: 'gold' }, maxBuy: 2400, minPrice: 1800 };
+  const mins = [0, 1, 2, 3, 4].map((i) => ab2.buildCriteria(t, i).minBuy);
+  assert.deepEqual(mins, [1800, 1900, 2000, 2100, 1800]);
+  assert.equal(ab2.buildCriteria(t, 0).maxBuy, 2400);
+  assert.deepEqual(ab2.minPriceValues(2300, 2400), [2300]);
+  // Sem o campo, continua como antes (0 e valores baixos).
+  assert.equal(ab2.buildCriteria({ criteria: {}, maxBuy: 2400 }, 0).minBuy, 0);
+  const tp = (extra) => ab2.targetProblem(Object.assign({ kind: 'player', criteria: { type: 'player', level: 'gold' }, minRating: 85, maxBuy: 2400 }, extra));
+  assert.equal(tp({ minPrice: 1800 }), null);
+  assert.match(tp({ minPrice: 2400 }), /menor que o "Compra até"/);
+});

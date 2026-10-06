@@ -123,12 +123,12 @@ test('alvos de versões antigas ficam desligados até revisar', () => {
 test('descreve alvos deixando claro o tipo', () => {
   assert.equal(ab.describeTarget(shadowConsumable), 'CONSUMÍVEL · Estilo Shadow');
   const t = { kind: 'player', criteria: { type: 'player', playStyle: 268, position: 'CB', level: 'gold', club: 243 }, minRating: 84, maxRating: 0 };
-  assert.equal(ab.describeTarget(t), 'JOGADOR · CB · Química Shadow · time #243 · Ouro · Nota 84–?');
+  assert.equal(ab.describeTarget(t), 'JOGADOR · CB · Química Shadow · time #243 · Ouro · Nota 84+');
   // Com nomes: do alvo ou do serviço de nomes, nunca o número.
   assert.equal(ab.describeTarget(Object.assign({}, t, { labels: { club: 'Real Madrid' } })),
-    'JOGADOR · CB · Química Shadow · Real Madrid · Ouro · Nota 84–?');
+    'JOGADOR · CB · Química Shadow · Real Madrid · Ouro · Nota 84+');
   assert.equal(ab.describeTarget(t, { club: (id) => (id === 243 ? 'Real Madrid' : null) }),
-    'JOGADOR · CB · Química Shadow · Real Madrid · Ouro · Nota 84–?');
+    'JOGADOR · CB · Química Shadow · Real Madrid · Ouro · Nota 84+');
   assert.match(ab.describeTarget({ criteria: {} }), /^TIPO NÃO DEFINIDO/);
 });
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.5.1
+// @version      1.5.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.5.1';
+  const SCRIPT_VERSION = '1.5.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -167,8 +167,23 @@
     return values;
   }
 
+  // Com "Buscar a partir de": o preço mínimo da busca varia só alguns degraus
+  // acima do valor escolhido (para não vir resultado repetido do cache).
+  function minPriceValues(minPrice, maxBuy) {
+    const top = roundDown(maxBuy);
+    let p = roundDown(minPrice);
+    const values = [];
+    for (let i = 0; i < 4 && p < top; i++) {
+      values.push(p);
+      p = nextPrice(p);
+    }
+    return values.length ? values : [0];
+  }
+
   function buildCriteria(target, busterIndex) {
-    const values = cacheBusterValues(target.maxBuy);
+    const values = target.minPrice > 0 && target.minPrice < target.maxBuy
+      ? minPriceValues(target.minPrice, target.maxBuy)
+      : cacheBusterValues(target.maxBuy);
     return Object.assign({}, target.criteria, {
       maxBuy: roundDown(target.maxBuy),
       minBuy: values[busterIndex % values.length],
@@ -425,6 +440,7 @@
       }
     }
     if (!(t.maxBuy >= 200)) return 'preço máximo de compra precisa ser pelo menos 200';
+    if (t.minPrice > 0 && t.minPrice >= t.maxBuy) return '"Buscar a partir de" precisa ser menor que o "Compra até"';
     return null;
   }
 
@@ -528,7 +544,10 @@
     if (c.level && c.level !== 'any') parts.push((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level);
     if (t.psPlus) parts.push('Com PlayStyle+');
     (t.playStyles || []).forEach((p) => parts.push(playStyleName(p.id, p.plus)));
-    if (t.minRating > 0 || t.maxRating > 0) parts.push('Nota ' + (t.minRating || '?') + '–' + (t.maxRating || '?'));
+    if (t.minRating > 0 && !(t.maxRating > 0)) parts.push('Nota ' + t.minRating + '+');
+    else if (t.maxRating > 0 && !(t.minRating > 0)) parts.push('Nota até ' + t.maxRating);
+    else if (t.minRating > 0) parts.push('Nota ' + (t.minRating === t.maxRating ? t.minRating : t.minRating + '–' + t.maxRating));
+    if (t.minPrice > 0) parts.push('Busca a partir de ' + fmt(t.minPrice));
     return parts;
   }
 
@@ -3024,6 +3043,9 @@
               <div><label>Compra até</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="newMax" inputmode="numeric" placeholder="Ex.: 5000"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
               <div><label>Revende por (opcional)</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="newSell" inputmode="numeric" placeholder="vazio = não revende"><button type="button" data-step="+" data-from="[data-el=newMax]" aria-label="Aumentar">+</button></div></div>
             </div>
+            <label>Buscar a partir de (opcional)</label>
+            <div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="newMinPrice" inputmode="numeric" placeholder="vazio = qualquer preço"><button type="button" data-step="+" aria-label="Aumentar">+</button></div>
+            <p class="hint">Preço mínimo da busca. Deixa de fora as cartas baratas: útil com "Nota mínima" (ex.: Ouro, nota 85+, de 1.800 a 2.400).</p>
             <label>Quantas cartas comprar</label>
             <input data-el="newCount" inputmode="numeric" placeholder="vazio = sem limite">
             <p class="hint">Quando chegar nesse número, o alvo é desligado e o bot para de procurar essa carta.</p>
@@ -3261,6 +3283,7 @@
           <div class="grid">
             <div><label>Compra até</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="maxBuy" inputmode="numeric" value="${t.maxBuy}"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
             <div><label>Revende por</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="sellPrice" inputmode="numeric" value="${t.sellPrice || ''}"><button type="button" data-step="+" data-from="[data-f=maxBuy]" aria-label="Aumentar">+</button></div></div>
+            <div><label>Buscar a partir de</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-f="minPrice" inputmode="numeric" placeholder="qualquer" value="${t.minPrice > 0 ? t.minPrice : ''}"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
             <div><label>Quantidade</label><input data-f="maxCount" inputmode="numeric" placeholder="sem limite" value="${t.maxCount > 0 ? t.maxCount : ''}"></div>
             <div class="count"><label>Progresso</label><div><b>${escapeHtml(countLabel(t))}</b>${t.bought ? ' <button data-f="resetCount">Zerar</button>' : ''}</div></div>
           </div>
@@ -4308,7 +4331,10 @@
       }
       const summary = describeTarget(draft, names);
       const count = parseCoins(el('newCount').value);
-      if (!win.confirm('Confirme o alvo:\n\n' + summary + '\nCompra até ' + fmt(maxBuy) +
+      const minPriceRaw = parseCoins(el('newMinPrice').value);
+      const minPrice = minPriceRaw > 0 ? roundDown(minPriceRaw) : 0;
+      if (minPrice && minPrice >= maxBuy) return win.alert('"Buscar a partir de" precisa ser menor que o "Compra até".');
+      if (!win.confirm('Confirme o alvo:\n\n' + summary + (minPrice ? '\nBusca de ' + fmt(minPrice) + ' a ' + fmt(maxBuy) : '') + '\nCompra até ' + fmt(maxBuy) +
         '\nQuantidade: ' + (count > 0 ? count + ' carta(s)' : 'sem limite') +
         (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       app.state.targets.push({
@@ -4326,13 +4352,14 @@
         minRating: edited.minRating,
         maxRating: edited.maxRating,
         maxBuy,
+        minPrice,
         sellPrice,
         enabled: true,
         card,
         futbin: card && app.capturedFutbin && app.capturedCard === card ? app.capturedFutbin : null,
       });
       save();
-      ['newName', 'newMax', 'newSell', 'newCount'].forEach((k) => { el(k).value = ''; });
+      ['newName', 'newMax', 'newSell', 'newCount', 'newMinPrice'].forEach((k) => { el(k).value = ''; });
       app.captured = null;
       app.capturedCard = null;
       app.capturedLabels = {};
@@ -4633,6 +4660,17 @@
       if (f === 'maxBuy') target.maxBuy = parseCoins(e.target.value) || target.maxBuy;
       if (f === 'maxBuy' || f === 'sellPrice') updateTargetProfit(tg);
       if (f === 'sellPrice') target.sellPrice = parseCoins(e.target.value);
+      if (f === 'minPrice') {
+        const v = parseCoins(e.target.value);
+        if (v > 0 && v >= target.maxBuy) {
+          e.target.value = target.minPrice > 0 ? target.minPrice : '';
+          return win.alert('"Buscar a partir de" precisa ser menor que o "Compra até" (' + fmt(target.maxBuy) + ').');
+        }
+        target.minPrice = v > 0 ? roundDown(v) : 0;
+        save();
+        renderTargets();
+        return;
+      }
       if (f === 'maxCount') {
         target.maxCount = parseCoins(e.target.value);
         save();
@@ -5027,7 +5065,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, stepPrice, targetLedgerStats, migrateLedger, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

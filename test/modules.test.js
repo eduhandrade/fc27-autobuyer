@@ -26,7 +26,7 @@ test('registro: compras antigas entram pelo "Item bought for"', () => {
     { id: 1, name: 'Wirtz', rating: 86, lastSalePrice: 12750, tradeState: null },
     { id: 2, name: 'Cucurella', rating: 86, lastSalePrice: 0, tradeState: 'expired', buyNow: 9000 },
     { id: 3, name: 'Leilão', lastSalePrice: 3000, tradeState: 'closed', currentBid: 4000, buyNow: 6000 },
-  ], 5);
+  ], 5, 'unassigned');
   assert.equal(ch.added, 3);
   assert.equal(ledger.i1.cost, 12750);
   assert.equal(ledger.i1.status, 'na lista');
@@ -37,6 +37,44 @@ test('registro: compras antigas entram pelo "Item bought for"', () => {
   assert.equal(ab.entryProfit(ledger.i3), 800);
   const sum = ab.ledgerSummary(ledger);
   assert.deepEqual(sum, { soldCount: 1, revenue: 3800, soldCost: 3000, profit: 800, openCount: 2, openCost: 12750, unknownCost: 1, boughtCount: 0, boughtCost: 0 });
+});
+
+test('registro: carta do clube mandada para a lista não conta no lucro', () => {
+  const ledger = {};
+  ab.syncLedger(ledger, [{ id: 7, name: 'Wirtz', rating: 89, lastSalePrice: 60000, tradeState: 'closed', buyNow: 40000 }], 5, 'transfer');
+  assert.equal(ledger.i7.ignored, true);
+  assert.equal(ab.ledgerSummary(ledger).profit, 0);
+  assert.equal(ab.ledgerSummary(ledger).soldCount, 0);
+  assert.deepEqual(ab.dailyProfit(ledger), []);
+  // Compra do bot sempre conta, mesmo aparecendo depois na lista.
+  ab.recordBuy(ledger, { itemId: 8, name: 'Kane', price: 25000, source: 'bot', at: 1 });
+  ab.syncLedger(ledger, [{ id: 8, name: 'Kane', tradeState: 'closed', buyNow: 27250 }], 6, 'transfer');
+  assert.equal(ab.ledgerSummary(ledger).soldCount, 1);
+  // Comprada à mão: aparece em Não atribuídos e passa a contar.
+  ab.syncLedger(ledger, [{ id: 9, name: 'X', lastSalePrice: 1000 }], 7, 'transfer');
+  assert.equal(ledger.i9.ignored, true);
+  ab.syncLedger(ledger, [{ id: 9, name: 'X', lastSalePrice: 1000 }], 8, 'unassigned');
+  assert.equal(ledger.i9.ignored, false);
+});
+
+test('registro antigo: só as compras do bot continuam contando', () => {
+  const ledger = ab.migrateLedger({
+    i1: { itemId: 1, source: 'web app', cost: 60000, status: 'vendida', soldFor: 40000 },
+    i2: { itemId: 2, source: 'bot', cost: 1000, status: 'vendida', soldFor: 2000 },
+  });
+  assert.equal(ledger.i1.ignored, true);
+  assert.ok(!ledger.i2.ignored);
+  assert.equal(ab.ledgerSummary(ledger).profit, 900);
+});
+
+test('configurações antigas: sem limite de compras e 600 buscas', () => {
+  const mem = { 'fc27-autobuyer:v1': JSON.stringify({ settings: { maxSearches: 300, maxBuys: 10 } }) };
+  const store = ab.createStore({ getItem: (k) => mem[k] || null, setItem: (k, v) => { mem[k] = v; } });
+  const st = store.load();
+  assert.equal(st.settings.maxSearches, 600);
+  assert.equal(st.settings.maxBuys, 0);
+  const mem2 = { 'fc27-autobuyer:v1': JSON.stringify({ settings: { maxSearches: 1000, v: 2 } }) };
+  assert.equal(ab.createStore({ getItem: (k) => mem2[k] || null }).load().settings.maxSearches, 1000);
 });
 
 test('lances: próximo lance e cartas escolhidas', () => {

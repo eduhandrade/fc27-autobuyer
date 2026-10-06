@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.5.0
+// @version      1.5.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.5.0';
+  const SCRIPT_VERSION = '1.5.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1427,7 +1427,10 @@
 
   // Atualiza o registro com os itens da lista de transferências (ou de outra
   // pilha). Itens desconhecidos entram com o custo do "Item bought for".
-  function syncLedger(ledger, items, now) {
+  // pile: de onde vieram as cartas ('transfer' ou 'unassigned'). Carta que o
+  // bot não comprou e apareceu primeiro na lista de transferências veio do
+  // seu clube/elenco: fica registrada, mas não conta no lucro.
+  function syncLedger(ledger, items, now, pile) {
     now = now || Date.now();
     const changes = { added: 0, sold: [] };
     for (const it of items || []) {
@@ -1444,10 +1447,19 @@
           source: 'web app',
           boughtAt: now,
           status: 'comprada',
+          origin: pile === 'unassigned' ? 'não atribuídos' : 'clube',
+          ignored: pile !== 'unassigned',
+          autoIgnored: pile !== 'unassigned',
         };
         changes.added++;
       } else if (!(e.cost > 0) && it.lastSalePrice > 0) {
         e.cost = it.lastSalePrice;
+      }
+      // Apareceu em Não atribuídos: foi comprada, então conta.
+      if (pile === 'unassigned' && e.autoIgnored) {
+        e.ignored = false;
+        e.autoIgnored = false;
+        e.origin = 'não atribuídos';
       }
       // Troca o nome provisório ("Carta 85 #50") pelo nome real quando aparecer.
       if (it.name && /^Carta /.test(e.name || '') && !/^Carta /.test(it.name)) e.name = it.name;
@@ -1464,6 +1476,19 @@
     return changes;
   }
 
+  // Registros antigos: cartas que o bot não comprou entravam no lucro (ex.:
+  // jogador do elenco mandado para venda). Agora ficam fora, até você marcar.
+  function migrateLedger(ledger) {
+    for (const e of Object.values(ledger || {})) {
+      if (!e || e.origin) continue;
+      if (e.source === 'bot') { e.origin = 'bot'; continue; }
+      e.origin = 'clube';
+      e.ignored = true;
+      e.autoIgnored = true;
+    }
+    return ledger;
+  }
+
   // Resultado das compras de um alvo: as registradas com o alvo e, das mais
   // antigas (sem alvo anotado), as da mesma carta do alvo.
   function targetLedgerStats(t, ledger) {
@@ -1475,7 +1500,7 @@
       (!(t.minRating > 0) || !(e.rating > 0) || e.rating >= t.minRating) &&
       (!(t.maxRating > 0) || !(e.rating > 0) || e.rating <= t.maxRating);
     for (const e of Object.values(ledger || {})) {
-      if (e.status === 'removida') continue;
+      if (e.status === 'removida' || e.ignored) continue;
       if (e.targetId ? e.targetId !== t.id : !sameCard(e)) continue;
       if (e.status === 'vendida') {
         const p = entryProfit(e);
@@ -1535,7 +1560,7 @@
   function dailyProfit(ledger, period) {
     const days = new Map();
     for (const e of Object.values(ledger || {})) {
-      if (e.status !== 'vendida' || !inPeriod(e.soldAt, period)) continue;
+      if (e.ignored || e.status !== 'vendida' || !inPeriod(e.soldAt, period)) continue;
       const p = entryProfit(e);
       if (p == null) continue;
       const k = dayKey(e.soldAt);
@@ -1551,6 +1576,7 @@
   function ledgerSummary(ledger, period) {
     const out = { soldCount: 0, revenue: 0, soldCost: 0, profit: 0, openCount: 0, openCost: 0, unknownCost: 0, boughtCount: 0, boughtCost: 0 };
     for (const e of Object.values(ledger || {})) {
+      if (e.ignored) continue;
       if (period && inPeriod(e.boughtAt, period)) {
         out.boughtCount++;
         out.boughtCost += e.cost > 0 ? e.cost : 0;
@@ -2718,8 +2744,8 @@
     delayMax: 8,
     pauseEvery: 25,
     pauseMinutes: 3,
-    maxSearches: 300,
-    maxBuys: 10,
+    maxSearches: 600,
+    maxBuys: 0,
     budget: 0,
     platform: 'ps',
     futbinMargin: 15,
@@ -2745,11 +2771,19 @@
         } catch (e) {
           saved = {};
         }
+        const settings = Object.assign({}, DEFAULT_SETTINGS, saved.settings);
+        // v2: sem limite de compras por sessão (vale a quantidade de cada alvo)
+        // e 600 buscas por sessão em vez de 300.
+        if (!(settings.v >= 2)) {
+          if (settings.maxSearches === 300) settings.maxSearches = 600;
+          settings.maxBuys = 0;
+          settings.v = 2;
+        }
         return {
-          settings: Object.assign({}, DEFAULT_SETTINGS, saved.settings),
+          settings,
           targets: (Array.isArray(saved.targets) ? saved.targets : []).map(migrateTarget),
           history: Array.isArray(saved.history) ? saved.history : [],
-          ledger: saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {},
+          ledger: migrateLedger(saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {}),
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
         };
       },
@@ -2821,6 +2855,7 @@
 #fcab-panel .rows .r div:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #fcab-panel .sg-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
 #fcab-panel .sg-count{font-size:13px;background:#12344d;color:#6fc3ff;border-radius:999px;padding:2px 8px;white-space:nowrap}
+#fcab-panel .r.ignored{opacity:.6}
 #fcab-panel .tg-result{font-size:13px;margin-top:3px}
 #fcab-panel .tg-result span{color:#9aa0a6;font-size:12px}
 #fcab-panel .profit-line{margin-top:6px}
@@ -2919,7 +2954,6 @@
     ['pauseEvery', 'Fazer uma pausa a cada N buscas (0 = nunca)'],
     ['pauseMinutes', 'Duração da pausa (minutos)'],
     ['maxSearches', 'Máximo de buscas por sessão (0 = sem limite)'],
-    ['maxBuys', 'Máximo de compras por sessão (0 = sem limite)'],
     ['budget', 'Orçamento máximo por sessão em moedas (0 = sem limite)'],
     ['futbinMargin', 'Margem abaixo do FUTBIN para sugerir a compra (%)'],
   ];
@@ -3679,9 +3713,12 @@
         const detail = e.status === 'vendida'
           ? 'pago ' + (e.cost ? fmt(e.cost) : '?') + ' → vendida ' + fmt(e.soldFor)
           : 'pago ' + (e.cost ? fmt(e.cost) : '?') + ' · ' + e.status + (e.listedFor ? ' (' + fmt(e.listedFor) + ')' : '');
-        return '<div class="r"><div>' + escapeHtml((e.name || 'carta') + (e.rating ? ' ' + e.rating : '')) +
+        const key = ledgerKey(e.itemId);
+        const toggle = e.source === 'bot' ? ''
+          : '<br><button type="button" data-ledger-toggle="' + escapeHtml(key) + '">' + (e.ignored ? 'Contar no lucro' : 'Não contar') + '</button>';
+        return '<div class="r' + (e.ignored ? ' ignored' : '') + '"><div>' + escapeHtml((e.name || 'carta') + (e.rating ? ' ' + e.rating : '')) +
           '<br><small style="color:#9aa3b2">' + escapeHtml(detail + ' · ' + new Date(e.status === 'vendida' ? e.soldAt : e.boughtAt).toLocaleDateString('pt-BR')) +
-          '</small></div><div>' + (p == null ? '' : money(p)) + '</div></div>';
+          (e.ignored ? ' · não conta: veio do seu clube' : '') + '</small>' + toggle + '</div><div>' + (p == null || e.ignored ? '' : money(p)) + '</div></div>';
       }).join('') || '<p class="hint">Nada registrado ' + (period ? 'neste período' : 'ainda') + '.</p>';
     }
 
@@ -3741,10 +3778,10 @@
       return 'Abra no Web App: <b>Transferências → ' + PILE_NAMES[which] + '</b>, espere carregar e volte aqui.';
     }
 
-    function applySync(items, quiet) {
-      const ch = syncLedger(ledger(), items);
+    function applySync(items, quiet, pile) {
+      const ch = syncLedger(ledger(), items, Date.now(), pile || 'transfer');
       ch.sold.forEach((e) => {
-        const p = entryProfit(e);
+        const p = e.ignored ? null : entryProfit(e);
         log('Vendida: ' + e.name + ' por ' + fmt(e.soldFor) + (p == null ? '' : ' · lucro ' + (p > 0 ? '+' : '') + fmt(p) + ' (já sem os 5% da EA)'), 'success');
       });
       save();
@@ -3759,7 +3796,7 @@
         for (const which of ['transfer', 'unassigned']) {
           const r = await readPile(which);
           if (r.ok) {
-            applySync(r.items);
+            applySync(r.items, false, which);
             if (r.source === 'captura') log(PILE_NAMES[which] + ': usei a que o Web App carregou às ' + new Date(r.at).toLocaleTimeString('pt-BR') + '.', 'warn');
           } else {
             log('Não consegui ler ' + PILE_NAMES[which] + ' (' + r.why + '). Abra essa tela no Web App e toque em Atualizar de novo.', 'warn');
@@ -4059,7 +4096,7 @@
             return;
           }
           if (r.source === 'captura') notes.push(PILE_NAMES[w] + ' carregada pelo Web App às ' + new Date(r.at).toLocaleTimeString('pt-BR'));
-          applySync(r.items, true);
+          applySync(r.items, true, w);
           items = items.concat(r.items);
         }
         sellGroups = groupSellable(items, ledger());
@@ -4346,6 +4383,18 @@
     });
 
     panel.addEventListener('click', (e) => {
+      const ledgerBtn = e.target.closest('[data-ledger-toggle]');
+      if (ledgerBtn) {
+        const entry = ledger()[ledgerBtn.dataset.ledgerToggle];
+        if (entry) {
+          entry.ignored = !entry.ignored;
+          entry.autoIgnored = false;
+          save();
+          renderProfit();
+          renderTargets();
+        }
+        return;
+      }
       // Botões − e +: sobem/descem um degrau de preço da EA (como no app).
       const stepBtn = e.target.closest('[data-step]');
       if (stepBtn) {
@@ -4602,8 +4651,8 @@
     return {
       log,
       onCaptured,
-      syncFromTransferList(items) {
-        applySync(items, true);
+      syncFromTransferList(items, pile) {
+        applySync(items, true, pile);
         if (!panel.hidden && tab === 'targets' && !el('targets').contains(doc.activeElement)) renderTargets();
       },
       refreshTargets() {
@@ -4899,7 +4948,7 @@
     installPileCapture(win, (which, json) => {
       const items = itemsFromPileJson(json, lookup || {});
       piles[which] = { at: Date.now(), items };
-      if (ui && (which === 'transfer' || which === 'unassigned')) ui.syncFromTransferList(items);
+      if (ui && (which === 'transfer' || which === 'unassigned')) ui.syncFromTransferList(items, which);
     });
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
@@ -4954,7 +5003,7 @@
       if (!adapter.ready()) return;
       clearInterval(timer);
       adapter.hookManualSearch((criteria, card) => ui.onCaptured(criteria, card));
-      adapter.hookTransferList((items) => ui.syncFromTransferList(items));
+      adapter.hookTransferList((items) => ui.syncFromTransferList(items, 'transfer'));
       if (loadChemStyles(adapter.localize())) ui.refreshFilters();
       const hooks = overlay.install();
       ui.log('Web App detectado. Pronto para usar.', 'success');
@@ -4978,7 +5027,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, stepPrice, targetLedgerStats, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, stepPrice, targetLedgerStats, migrateLedger, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

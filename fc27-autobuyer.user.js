@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.5.5
+// @version      1.6.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.5.5';
+  const SCRIPT_VERSION = '1.6.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2338,21 +2338,63 @@
 
   // Confere a lista de observação: cartas ganhas vão para a lista de
   // transferências e entram no registro com o valor do lance.
+  // o.sell (opcional): { bin, duration, onlyIds } anuncia as ganhas por "bin";
+  // onlyIds = só as cartas dos lances desta sessão.
   async function collectWonBids(o) {
     const { adapter, ledger, log, settings: s } = o;
+    const wait = o.wait || sleepMs;
+    const trace = o.trace || (() => {});
+    const sell = o.sell && o.sell.bin > 0 ? o.sell : null;
     const pile = await adapter.pile('watch');
     if (!pile.success) return { error: pile.missing ? 'o Web App não ofereceu a lista de observação' : 'erro ' + pile.status };
-    const counts = { ganhou: 0, ganhando: 0, superado: 0, perdeu: 0, acompanhando: 0, moved: 0 };
+    const counts = { ganhou: 0, ganhando: 0, superado: 0, perdeu: 0, acompanhando: 0, moved: 0, listed: 0, simulated: 0, failed: 0 };
     for (const it of pile.items) {
       const st = watchStatus(it);
       counts[st]++;
       if (st !== 'ganhou') continue;
       recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId, price: it.currentBid, source: 'lance' });
-      if (s.dryRun) continue;
-      const moved = await adapter.moveToTransferList(it.raw);
+      const toSell = sell && (!sell.onlyIds || sell.onlyIds.has(ledgerKey(it.id)));
+      if (s.dryRun) {
+        if (toSell) {
+          counts.simulated++;
+          trace('Simulação: anunciaria ' + describeItem(it) + ' (ganha por ' + fmt(it.currentBid) + ') por ' + fmt(sell.bin) + '.', 'success');
+        }
+        continue;
+      }
+      if (!it.raw) {
+        counts.failed++;
+        trace('❌ ' + describeItem(it) + ': abra "Transfer Targets" no Web App e toque em Conferir lances de novo.', 'warn');
+        continue;
+      }
+      let moved;
+      try { moved = await adapter.moveToTransferList(it.raw); } catch (e) { moved = { success: false, status: e.message }; }
       if (moved.success) counts.moved++;
-      else log('Não consegui mover ' + it.name + ' para a lista de transferências (erro ' + moved.status + ').', 'warn');
-      await sleepMs(400);
+      else {
+        log('Não consegui mover ' + it.name + ' para a lista de transferências (erro ' + moved.status + ').', 'warn');
+        trace('❌ ' + describeItem(it) + ': não consegui mover para a lista (erro ' + moved.status + ').', 'warn');
+        await wait(400);
+        continue;
+      }
+      await wait(randomBetween(500, 1000, Math.random));
+      if (toSell) {
+        const bin = roundDown(sell.bin);
+        let listed;
+        try { listed = await adapter.list(it.raw, prevPrice(bin), bin, sell.duration || 3600); } catch (e) { listed = { success: false, status: e.message }; }
+        if (listed.success) {
+          counts.listed++;
+          const e = ledger[ledgerKey(it.id)];
+          if (e) { e.status = 'à venda'; e.listedFor = bin; }
+          const profit = netAfterTax(bin) - (it.currentBid || 0);
+          log('Anunciei ' + describeItem(it) + ' por ' + fmt(bin) + ' (lucro estimado ' + fmt(profit) + ').', 'success');
+          trace('✅ ' + describeItem(it) + ': ganha por ' + fmt(it.currentBid) + ', anunciada por ' + fmt(bin) + ' (lucro ' + fmt(profit) + ').', 'success');
+        } else {
+          counts.failed++;
+          trace('❌ ' + describeItem(it) + ': não consegui anunciar (erro ' + listed.status + '). Ficou na lista de transferências.', 'warn');
+          const kind = classifyStatus(listed.status);
+          if (FATAL_MESSAGES[kind]) { log(FATAL_MESSAGES[kind], 'error'); break; }
+        }
+        await wait(randomBetween(800, 1500, Math.random));
+      }
     }
     return counts;
   }
@@ -2890,6 +2932,7 @@
           ledger: migrateLedger(saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {}),
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
           bids: pruneBids(saved.bids),
+          bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
         };
       },
       save(state) {
@@ -3166,6 +3209,11 @@
             <div><label>Máximo de buscas</label><input data-el="bidSearches" inputmode="numeric" value="20"></div>
           </div>
           <p class="hint">Lance mínimo vazio: o bot dá o menor lance aceito pela EA. Com mínimo, dá pelo menos esse valor. Mínimo igual ao máximo = sempre aquele lance exato.</p>
+          <label>Revender as cartas ganhas por</label>
+          <div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidSell" inputmode="numeric" placeholder="vazio = não anuncia"><button type="button" data-step="+" data-from="[data-el=bidMax]" aria-label="Aumentar">+</button></div>
+          <div class="hint" data-el="bidSellProfit"></div>
+          <label><input type="checkbox" data-el="bidOnlySession" checked> Anunciar só as ganhas nos lances desta sessão</label>
+          <label><input type="checkbox" data-el="bidAutoCollect" checked> Ao terminar os lances, esperar os leilões acabarem e conferir/anunciar sozinho</label>
           <div class="ed-actions">
             <button class="go" data-act="bidStart">Dar lances</button>
             <button class="no" data-act="modStop">Parar</button>
@@ -3173,7 +3221,7 @@
           </div>
           <div class="result" data-el="bidResult" hidden></div>
           <div class="bidlog" data-el="bidLog" hidden></div>
-          <p class="hint">"Conferir lances" olha a sua lista de observação: as cartas ganhas vão para a lista de transferências e entram no Lucro com o valor do lance.</p>
+          <p class="hint">"Conferir lances" olha a sua lista de observação: as cartas ganhas vão para a lista de transferências, entram no Lucro com o valor do lance e, se você preencheu "Revender as cartas ganhas por", são anunciadas por esse preço (1 hora).</p>
         </div>
       </section>
       <section data-pane="sell" hidden>
@@ -3963,6 +4011,9 @@
       if (plan.maxBid < 150) return win.alert('Informe o lance máximo por carta (mínimo 150).');
       if (plan.minBid > 0) plan.minBid = roundDown(plan.minBid);
       if (plan.minBid > plan.maxBid) return win.alert('O lance mínimo não pode ser maior que o máximo.');
+      const sellBin = parseCoins(el('bidSell').value);
+      if (sellBin > 0 && netAfterTax(roundDown(sellBin)) <= plan.maxBid &&
+        !win.confirm('Revendendo por ' + fmt(roundDown(sellBin)) + ', as cartas ganhas pelo lance máximo dão prejuízo (5% da EA). Continuar?')) return;
       if (!(plan.maxBids > 0)) return win.alert('Informe quantos lances dar.');
       const problem = targetProblem(Object.assign({}, plan.target, { maxBuy: 1000 }));
       if (problem) return win.alert('Não dá para usar essas cartas: ' + problem + '.');
@@ -3977,42 +4028,98 @@
       el('bidResult').hidden = false;
       el('bidResult').textContent = 'Dando lances…';
       log('Lances em massa iniciados.');
-      const lines = [];
-      const box = el('bidLog');
-      box.hidden = false;
-      const trace = (msg, level) => {
-        lines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
-        if (lines.length > 60) lines.length = 60;
-        box.innerHTML = lines.join('');
-      };
+      const trace = bidTracer();
+      app.state.bidSession = { start: Date.now(), ids: [], until: 0 };
+      save();
       trace('Começando: ' + describeTarget(plan.target, names) + '.', 'info');
       try {
         const onBid = (it, amount) => {
           if (!(it.id > 0)) return;
           app.state.bids = app.state.bids || {};
           app.state.bids[ledgerKey(it.id)] = { amount, at: Date.now(), name: it.name, targetId: plan.target && plan.target.id };
+          const sess = bidSession();
+          sess.ids.push(ledgerKey(it.id));
+          sess.until = Math.max(sess.until || 0, Date.now() + (it.expires > 0 ? it.expires : 3600) * 1000);
+          app.state.bidSession = sess;
           save();
         };
         const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, isStopped: () => modStop });
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
+        // Espera os leilões acabarem e confere/anuncia as ganhas.
+        const sess = bidSession();
+        if (el('bidAutoCollect').checked && !modStop && sess.ids.length && !/captcha|sessão|limitad/i.test(r.stopReason)) {
+          const until = sess.until + 20000;
+          trace('Esperando os leilões acabarem (até ' + new Date(until).toLocaleTimeString('pt-BR') + ') para conferir' +
+            (bidSellPlan() ? ' e anunciar' : '') + '. Toque em Parar para cancelar.', 'info');
+          let lastNote = 0;
+          while (!modStop && Date.now() < until) {
+            if (Date.now() - lastNote > 60000) {
+              lastNote = Date.now();
+              trace('Faltam ~' + Math.max(1, Math.ceil((until - Date.now()) / 60000)) + ' min para conferir.', 'muted');
+            }
+            await sleepMs(1000);
+          }
+          if (!modStop) await runCollect(trace);
+          else trace('Conferência automática cancelada.', 'warn');
+        }
       } finally {
         modBusy = '';
       }
     }
 
+    // Lances desta sessão: guardados para anunciar só as cartas ganhas neles.
+    function bidSession() {
+      const s = app.state.bidSession;
+      return s && Array.isArray(s.ids) ? s : { start: 0, ids: [], until: 0 };
+    }
+
+    function bidSellPlan() {
+      const bin = parseCoins(el('bidSell').value);
+      if (!(bin > 0)) return null;
+      const onlyIds = el('bidOnlySession').checked ? new Set(bidSession().ids) : null;
+      return { bin: roundDown(bin), duration: 3600, onlyIds };
+    }
+
+    function updateBidSellProfit() {
+      const bin = parseCoins(el('bidSell').value);
+      const max = parseCoins(el('bidMax').value);
+      el('bidSellProfit').innerHTML = bin > 0 && max > 0 ? targetProfitHtml(max, bin).replace('Lucro por carta', 'Lucro por carta (se ganhar pelo lance máximo)') : '';
+    }
+
+    // Confere a lista de observação; usado pelo botão e ao fim dos lances.
+    async function runCollect(trace) {
+      el('bidResult').hidden = false;
+      el('bidResult').textContent = 'Conferindo lista de observação…';
+      const sell = bidSellPlan();
+      if (sell && sell.onlyIds && !sell.onlyIds.size) trace('Nenhum lance desta sessão para anunciar (desmarque "só desta sessão" para anunciar todas as ganhas).', 'warn');
+      const r = await collectWonBids({ adapter, ledger: ledger(), log, trace, settings: app.state.settings, sell });
+      save();
+      el('bidResult').innerHTML = r.error ? 'Não consegui: ' + escapeHtml(r.error)
+        : 'Ganhou <b>' + r.ganhou + '</b> (movidas para a lista: ' + r.moved + ')' +
+          (sell ? ' · anunciadas: <b>' + (r.listed || r.simulated) + '</b>' + (r.simulated ? ' (simulação)' : '') + (r.failed ? ', ' + r.failed + ' com erro' : '') : '') +
+          ' · ganhando ' + r.ganhando + ' · superado ' + r.superado + ' · perdeu ' + r.perdeu + '.';
+      if (!r.error) trace('Conferido: ganhou ' + r.ganhou + ', anunciadas ' + (r.listed || r.simulated) + '.', 'info');
+      return r;
+    }
+
+    function bidTracer() {
+      const lines = [];
+      const box = el('bidLog');
+      box.hidden = false;
+      return (msg, level) => {
+        lines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
+        if (lines.length > 80) lines.length = 80;
+        box.innerHTML = lines.join('');
+      };
+    }
+
     async function collectBids() {
       if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
       modBusy = 'lances';
-      el('bidResult').hidden = false;
-      el('bidResult').textContent = 'Conferindo lista de observação…';
       try {
-        const r = await collectWonBids({ adapter, ledger: ledger(), log, settings: app.state.settings });
-        save();
-        el('bidResult').innerHTML = r.error ? 'Não consegui: ' + escapeHtml(r.error)
-          : 'Ganhou <b>' + r.ganhou + '</b> (movidas para a lista: ' + r.moved + ') · ganhando ' + r.ganhando +
-            ' · superado ' + r.superado + ' · perdeu ' + r.perdeu + '.';
+        await runCollect(bidTracer());
       } finally {
         modBusy = '';
       }
@@ -4549,6 +4656,7 @@
         if (!next) return;
         input.value = next;
         input.dispatchEvent(new win.Event('change', { bubbles: true }));
+        if (input.dataset.el === 'bidSell' || input.dataset.el === 'bidMax') updateBidSellProfit();
         return;
       }
       const periodBtn = e.target.closest('[data-period]');
@@ -4700,6 +4808,7 @@
     el('sbcList').addEventListener('change', onSbcInput);
 
     panel.addEventListener('input', (e) => {
+      if (e.target.dataset && (e.target.dataset.el === 'bidSell' || e.target.dataset.el === 'bidMax')) updateBidSellProfit();
       const f = e.target.dataset && e.target.dataset.f;
       if (f === 'maxBuy' || f === 'sellPrice') updateTargetProfit(e.target.closest('.tg'));
       const card = e.target.closest('.sg');

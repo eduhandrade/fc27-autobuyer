@@ -175,3 +175,27 @@ test('lucro: cartas ganhas em leilão contam', () => {
   assert.equal(l3.i31.ignored, false);
   assert.equal(ab.ledgerSummary(l3).profit, 1450);
 });
+
+test('lances: confere e anuncia só as ganhas da sessão', async () => {
+  const won = (id, bid) => ({ id, name: 'Bremer', rating: 86, tradeState: 'closed', bidState: 'highest', currentBid: bid, raw: { id } });
+  const calls = [];
+  const adapter = {
+    async pile() { return { success: true, items: [won(1, 9000), won(2, 8000), { id: 3, tradeState: 'active', bidState: 'outbid', raw: {} }] }; },
+    async moveToTransferList(raw) { calls.push(['move', raw.id]); return { success: true }; },
+    async list(raw, start, bin, dur) { calls.push(['list', raw.id, start, bin, dur]); return { success: true }; },
+  };
+  const ledger = {};
+  const r = await ab.collectWonBids({ adapter, ledger, log: () => {}, settings: { dryRun: false }, wait: async () => {},
+    sell: { bin: 11000, duration: 3600, onlyIds: new Set(['i1']) } });
+  assert.equal(r.ganhou, 2);
+  assert.equal(r.moved, 2);
+  assert.equal(r.listed, 1);
+  assert.deepEqual(calls.filter((c) => c[0] === 'list'), [['list', 1, 10750, 11000, 3600]]);
+  assert.equal(ledger.i1.status, 'à venda');
+  assert.equal(ledger.i2.cost, 8000);
+  // Simulação: não move nem anuncia.
+  const calls2 = calls.length;
+  const r2 = await ab.collectWonBids({ adapter, ledger: {}, log: () => {}, settings: { dryRun: true }, wait: async () => {}, sell: { bin: 11000 } });
+  assert.equal(r2.simulated, 2);
+  assert.equal(calls.length, calls2);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.5.2
+// @version      1.5.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.5.2';
+  const SCRIPT_VERSION = '1.5.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1628,6 +1628,14 @@
     return Math.max(MIN_PRICE, roundDown(it.startingBid || MIN_PRICE));
   }
 
+  // Valor do lance: o menor aceito pela EA, mas nunca abaixo do "lance
+  // mínimo" escolhido (mínimo = máximo → sempre aquele valor exato).
+  function bidAmountFor(it, plan) {
+    const need = nextBidAmount(it);
+    const min = plan && plan.minBid > 0 ? roundDown(plan.minBid) : 0;
+    return Math.max(need, min);
+  }
+
   // Motivo para NÃO dar lance nesta carta, ou null.
   function bidProblem(it, plan, ctx) {
     ctx = ctx || {};
@@ -1635,7 +1643,7 @@
     if (it.bidState === 'highest') return 'você já é o maior lance';
     if (!(it.expires > 0)) return 'leilão encerrado';
     if (plan.maxExpires > 0 && it.expires > plan.maxExpires) return 'termina tarde demais';
-    const amount = nextBidAmount(it);
+    const amount = bidAmountFor(it, plan);
     if (amount > plan.maxBid) return 'lance necessário ' + fmt(amount) + ' passa do máximo';
     if (it.buyNow > 0 && amount >= it.buyNow) return 'lance chegaria no preço de compra imediata';
     if (ctx.coins != null && amount > ctx.coins) return 'moedas insuficientes';
@@ -1657,7 +1665,7 @@
       if (ctx.seen && ctx.seen.has(it.tradeId)) continue;
       const why = bidProblem(it, plan, { coins });
       if (why) { if (ctx.onSkip) ctx.onSkip(it, why); continue; }
-      const amount = nextBidAmount(it);
+      const amount = bidAmountFor(it, plan);
       out.push({ item: it, amount });
       coins -= amount;
       left--;
@@ -3068,11 +3076,13 @@
           <label>Quais cartas</label>
           <select data-el="bidTarget"></select>
           <div class="grid">
-            <div><label>Lance máximo por carta</label><input data-el="bidMax" inputmode="numeric" placeholder="Ex.: 1500"></div>
+            <div><label>Lance mínimo por carta</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidMin" inputmode="numeric" placeholder="automático"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
+            <div><label>Lance máximo por carta</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidMax" inputmode="numeric" placeholder="Ex.: 1500"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
             <div><label>Quantos lances</label><input data-el="bidCount" inputmode="numeric" value="10"></div>
             <div><label>Só leilões que terminam em até (min)</label><input data-el="bidMinutes" inputmode="numeric" value="5"></div>
             <div><label>Máximo de buscas</label><input data-el="bidSearches" inputmode="numeric" value="20"></div>
           </div>
+          <p class="hint">Lance mínimo vazio: o bot dá o menor lance aceito pela EA. Com mínimo, dá pelo menos esse valor. Mínimo igual ao máximo = sempre aquele lance exato.</p>
           <div class="ed-actions">
             <button class="go" data-act="bidStart">Dar lances</button>
             <button class="no" data-act="modStop">Parar</button>
@@ -3861,17 +3871,22 @@
       const plan = {
         target: Object.assign({}, choice.target, { maxBuy: 999999999 }),
         maxBid: parseCoins(el('bidMax').value),
+        minBid: parseCoins(el('bidMin').value),
         maxBids: parseCoins(el('bidCount').value),
         maxExpires: parseCoins(el('bidMinutes').value) * 60,
         maxSearches: parseCoins(el('bidSearches').value) || 20,
       };
       if (plan.maxBid < 150) return win.alert('Informe o lance máximo por carta (mínimo 150).');
+      if (plan.minBid > 0) plan.minBid = roundDown(plan.minBid);
+      if (plan.minBid > plan.maxBid) return win.alert('O lance mínimo não pode ser maior que o máximo.');
       if (!(plan.maxBids > 0)) return win.alert('Informe quantos lances dar.');
       const problem = targetProblem(Object.assign({}, plan.target, { maxBuy: 1000 }));
       if (problem) return win.alert('Não dá para usar essas cartas: ' + problem + '.');
       const total = plan.maxBid * plan.maxBids;
-      if (!win.confirm('Lances em massa:\n\n' + describeTarget(plan.target, names) + '\nAté ' + plan.maxBids + ' lance(s) de no máximo ' +
-        fmt(plan.maxBid) + ' (até ' + fmt(total) + ' moedas presas)\nLeilões que terminam em até ' + (plan.maxExpires / 60) + ' min' +
+      const bidText = plan.minBid > 0 && plan.minBid === roundDown(plan.maxBid) ? 'de exatamente ' + fmt(plan.minBid)
+        : (plan.minBid > 0 ? 'de ' + fmt(plan.minBid) + ' a ' : 'de no máximo ') + fmt(plan.maxBid);
+      if (!win.confirm('Lances em massa:\n\n' + describeTarget(plan.target, names) + '\nAté ' + plan.maxBids + ' lance(s) ' +
+        bidText + ' (até ' + fmt(total) + ' moedas presas)\nLeilões que terminam em até ' + (plan.maxExpires / 60) + ' min' +
         (app.state.settings.dryRun ? '\n\n(Modo simulação: nenhum lance será dado.)' : ''))) return;
       modBusy = 'lances';
       modStop = false;
@@ -5066,7 +5081,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    nextBidAmount, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
+    nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -135,3 +135,17 @@ test('venda: agrupa cartas iguais e calcula preço e lucro', () => {
   assert.match(ab.sellPrices(g, 150, 0).error, /mínimo/);
   assert.equal(ab.sellPrices(g, 1200, 1200).start, 1100);
 });
+
+test('lances: mínimo escolhido e lance exato', () => {
+  const it = (extra) => Object.assign({ tradeId: 1, kind: 'player', expires: 60, currentBid: 0, startingBid: 150, buyNow: 5000 }, extra);
+  assert.equal(ab.bidAmountFor(it(), { maxBid: 2000 }), 150);
+  assert.equal(ab.bidAmountFor(it(), { maxBid: 2000, minBid: 1500 }), 1500);
+  assert.equal(ab.bidAmountFor(it({ currentBid: 1600 }), { maxBid: 2000, minBid: 1500 }), 1700);
+  // Mínimo = máximo: sempre o valor exato; se já passou, não dá lance.
+  assert.equal(ab.bidAmountFor(it(), { maxBid: 1800, minBid: 1800 }), 1800);
+  assert.match(ab.bidProblem(it({ currentBid: 1800 }), { maxBid: 1800, minBid: 1800 }), /passa do máximo/);
+  const picks = ab.planBids([it(), it({ tradeId: 2, currentBid: 1700 })], { maxBid: 1800, minBid: 1800, maxBids: 5 });
+  assert.deepEqual(picks.map((p) => [p.item.tradeId, p.amount]), [[1, 1800], [2, 1800]]);
+  // Mínimo que chega no compre já: pula.
+  assert.match(ab.bidProblem(it({ buyNow: 1800 }), { maxBid: 2000, minBid: 1800 }), /compra imediata/);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.7.0
+// @version      1.7.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.7.0';
+  const SCRIPT_VERSION = '1.7.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2317,6 +2317,8 @@
         }
         await wait(randomBetween(800, 1600, random));
       }
+      // Entre uma busca e outra: conferir/anunciar os leilões que já acabaram.
+      if (o.between && !stopped()) await o.between();
       const pause = randomBetween(s.delayMin * 1000, s.delayMax * 1000, random);
       if (!stopped()) trace('Próxima busca em ' + Math.round(pause / 1000) + ' s… (' + (res.bids + res.simulated) + ' lance(s) até agora)', 'muted');
       await wait(pause);
@@ -3353,7 +3355,7 @@
           <div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidSell" inputmode="numeric" placeholder="vazio = não anuncia"><button type="button" data-step="+" data-from="[data-el=bidMax]" aria-label="Aumentar">+</button></div>
           <div class="hint" data-el="bidSellProfit"></div>
           <label><input type="checkbox" data-el="bidOnlySession" checked> Anunciar só as ganhas nos lances desta sessão</label>
-          <label><input type="checkbox" data-el="bidAutoCollect" checked> Ao terminar os lances, esperar os leilões acabarem e conferir/anunciar sozinho</label>
+          <label><input type="checkbox" data-el="bidAutoCollect" checked> Conferir/anunciar sozinho: a cada leilão que termina (enquanto dá lances) e, no fim, esperar os que faltam</label>
           <div class="ed-actions">
             <button class="go" data-act="bidStart">Dar lances</button>
             <button class="no" data-act="modStop">Parar</button>
@@ -4177,7 +4179,7 @@
       log('Lances em massa iniciados.');
       bidListNow = false;
       const trace = bidTracer();
-      app.state.bidSession = { start: Date.now(), ids: [], until: 0 };
+      app.state.bidSession = { start: Date.now(), ids: [], until: 0, pending: [] };
       save();
       trace('Começando: ' + describeTarget(plan.target, names) + '.', 'info');
       try {
@@ -4186,12 +4188,28 @@
           app.state.bids = app.state.bids || {};
           app.state.bids[ledgerKey(it.id)] = { amount, at: Date.now(), name: it.name, targetId: plan.target && plan.target.id };
           const sess = bidSession();
+          const endsAt = Date.now() + (it.expires > 0 ? it.expires : 3600) * 1000;
           sess.ids.push(ledgerKey(it.id));
-          sess.until = Math.max(sess.until || 0, Date.now() + (it.expires > 0 ? it.expires : 3600) * 1000);
+          sess.until = Math.max(sess.until || 0, endsAt);
+          sess.pending = (sess.pending || []).concat([{ id: ledgerKey(it.id), at: endsAt }]);
           app.state.bidSession = sess;
           save();
         };
-        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, isStopped: () => modStop });
+        // Anuncia as ganhas assim que cada leilão termina, sem esperar o fim.
+        let lastCollect = 0;
+        const between = async () => {
+          if (!el('bidAutoCollect').checked) return;
+          const sess = bidSession();
+          const ended = (sess.pending || []).filter((x) => Date.now() > x.at + 15000);
+          if (!ended.length || Date.now() - lastCollect < 45000) return;
+          lastCollect = Date.now();
+          trace(ended.length + ' leilão(ões) seu(s) terminou(aram): conferindo' + (bidSellPlan() ? ' e anunciando as ganhas' : '') + '…', 'info');
+          await runCollect(trace);
+          sess.pending = (sess.pending || []).filter((x) => !ended.includes(x));
+          app.state.bidSession = sess;
+          save();
+        };
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, isStopped: () => modStop });
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');

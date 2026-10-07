@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.5.3
+// @version      1.5.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.5.3';
+  const SCRIPT_VERSION = '1.5.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2152,6 +2152,8 @@
     const random = o.random || Math.random;
     const wait = o.wait || sleepMs;
     const stopped = o.isStopped || (() => false);
+    // trace: andamento detalhado (aba Lances), além do Log normal.
+    const trace = o.trace || (() => {});
     const seen = new Set();
     const res = { searches: 0, bids: 0, simulated: 0, missed: 0, coinsCommitted: 0, stopReason: '' };
     const maxRounds = plan.maxSearches > 0 ? plan.maxSearches : 30;
@@ -2171,20 +2173,31 @@
         const kind = classifyStatus(search.status);
         res.stopReason = FATAL_MESSAGES[kind] ? STOP_REASONS[kind] : 'erro ' + search.status + ' na busca';
         log(FATAL_MESSAGES[kind] || ('Erro ' + search.status + ' na busca de lances.'), 'error');
+        trace('Busca ' + res.searches + ': erro ' + search.status + '.', 'error');
         break;
       }
       const left = plan.maxBids > 0 ? plan.maxBids - res.bids - res.simulated : 0;
+      const skips = new Map();
       const picks = planBids(search.items, Object.assign({}, plan, { maxBids: left }), {
         coins: adapter.getCoins(),
         seen,
+        onSkip: (it, why) => skips.set(why, (skips.get(why) || 0) + 1),
       });
+      const skipText = Array.from(skips.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([why, n]) => n + ' ' + why).join(', ');
+      trace('Busca ' + res.searches + ' de ' + maxRounds + ': ' + search.items.length + ' leilão(ões) achados, ' +
+        picks.length + ' escolhido(s)' + (skipText ? ' · ignorados: ' + skipText : '') + '.', picks.length ? 'info' : 'muted');
       for (const pick of picks) {
         if (stopped()) break;
         seen.add(pick.item.tradeId);
         const what = describeItem(pick.item) + ' (termina em ' + Math.max(1, Math.round(pick.item.expires / 60)) + ' min)';
+        const now = pick.item.currentBid > 0 ? 'lance atual ' + fmt(pick.item.currentBid) : 'sem lances, inicial ' + fmt(pick.item.startingBid || MIN_PRICE);
+        trace('→ ' + describeItem(pick.item) + ': ' + now + ' · tentando ' + fmt(pick.amount) + ' · termina em ' +
+          Math.max(1, Math.round(pick.item.expires / 60)) + ' min', 'info');
         if (s.dryRun) {
           res.simulated++;
           log('SIMULAÇÃO: daria lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
+          trace('   simulação: lance de ' + fmt(pick.amount) + ' não foi dado de verdade.', 'success');
           continue;
         }
         const bid = await adapter.buy(pick.item.raw, pick.amount);
@@ -2192,6 +2205,7 @@
           res.bids++;
           res.coinsCommitted += pick.amount;
           log('Lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
+          trace('   ✅ lance de ' + fmt(pick.amount) + ' aceito.', 'success');
         } else {
           const kind = classifyStatus(bid.status);
           if (FATAL_MESSAGES[kind]) {
@@ -2201,12 +2215,16 @@
           }
           res.missed++;
           log('Lance não aceito em ' + describeItem(pick.item) + ' (alguém deu lance antes ou o leilão acabou).', 'warn');
+          trace('   ❌ não aceito (alguém deu lance antes ou o leilão acabou).', 'warn');
         }
         await wait(randomBetween(800, 1600, random));
       }
-      await wait(randomBetween(s.delayMin * 1000, s.delayMax * 1000, random));
+      const pause = randomBetween(s.delayMin * 1000, s.delayMax * 1000, random);
+      if (!stopped()) trace('Próxima busca em ' + Math.round(pause / 1000) + ' s… (' + (res.bids + res.simulated) + ' lance(s) até agora)', 'muted');
+      await wait(pause);
     }
     if (!res.stopReason) res.stopReason = 'parado por você';
+    trace('Fim: ' + res.stopReason + '.', 'warn');
     return res;
   }
 
@@ -2883,6 +2901,11 @@
 #fcab-panel .sg-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
 #fcab-panel .sg-count{font-size:13px;background:#12344d;color:#6fc3ff;border-radius:999px;padding:2px 8px;white-space:nowrap}
 #fcab-panel .r.ignored{opacity:.6}
+#fcab-panel .bidlog{margin-top:8px;max-height:260px;overflow:auto;background:#0e0f12;border:1px solid #2a2d33;border-radius:8px;padding:6px 8px;font-size:12px;line-height:1.45}
+#fcab-panel .bidlog .success{color:#4ade80}
+#fcab-panel .bidlog .warn{color:#fbbf24}
+#fcab-panel .bidlog .error{color:#f87171}
+#fcab-panel .bidlog .muted{color:#8b919c}
 #fcab-panel .tg-result{font-size:13px;margin-top:3px}
 #fcab-panel .tg-result span{color:#9aa0a6;font-size:12px}
 #fcab-panel .profit-line{margin-top:6px}
@@ -3089,6 +3112,7 @@
             <button data-act="bidCollect">Conferir lances</button>
           </div>
           <div class="result" data-el="bidResult" hidden></div>
+          <div class="bidlog" data-el="bidLog" hidden></div>
           <p class="hint">"Conferir lances" olha a sua lista de observação: as cartas ganhas vão para a lista de transferências e entram no Lucro com o valor do lance.</p>
         </div>
       </section>
@@ -3893,8 +3917,17 @@
       el('bidResult').hidden = false;
       el('bidResult').textContent = 'Dando lances…';
       log('Lances em massa iniciados.');
+      const lines = [];
+      const box = el('bidLog');
+      box.hidden = false;
+      const trace = (msg, level) => {
+        lines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
+        if (lines.length > 60) lines.length = 60;
+        box.innerHTML = lines.join('');
+      };
+      trace('Começando: ' + describeTarget(plan.target, names) + '.', 'info');
       try {
-        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, isStopped: () => modStop });
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, isStopped: () => modStop });
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');

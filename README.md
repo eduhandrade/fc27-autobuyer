@@ -61,8 +61,8 @@ O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts)
 2. Toque no botão verde **🧩 Enviar ao bot** (canto inferior esquerdo). Ele mostra os jogadores lidos e copia um código.
 3. No Web App da EA: ⚡ → aba **🧩 SBC** → **📋 Colar solução do FUTBIN** (se o Safari não deixar colar sozinho, toque e segure no campo → Colar → **Importar código colado**).
 4. Confira a lista: desmarque quem não quer comprar e ajuste **Pagar até**. Opcional: **🏠 Conferir no clube** (marca quem você já tem), **💲 Preço atual dos marcados** e **Usar o preço atual como "pagar até"**.
-5. **🎯 Criar alvos no sniper**: um alvo por jogador, 1 carta, **só aquela versão e aquela nota**, sem revenda (a carta fica em Não atribuídos). Se quiser, seus outros alvos ficam pausados até você tocar em **Reativar meus alvos pausados**.
-6. Toque em **Iniciar**. Cada alvo do SBC se desliga sozinho quando a carta é comprada.
+5. **🛒 Comprar os marcados**: o próprio módulo SBC procura e compra (1 de cada, **só aquela versão e aquela nota**, sem revenda), com o andamento na aba. Nada vai para o Sniper. **Parar** interrompe; tocar de novo continua de onde parou.
+6. **🧩 Montar elenco no SBC**: abra o desafio no Web App (a tela do elenco) e toque. O bot manda as cartas compradas para o clube, junta com as que você já tinha, coloca cada uma na vaga da posição dela e salva o desafio. **Ele não envia**: confira e envie você.
 
 Para o script funcionar no FUTBIN, o Userscripts precisa ter permissão em futbin.com (Ajustes → Safari → Extensões → Userscripts → Outros sites: Permitir).
 

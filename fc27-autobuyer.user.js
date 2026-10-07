@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.6.1
+// @version      1.7.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.6.1';
+  const SCRIPT_VERSION = '1.7.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2830,8 +2830,99 @@
         const response = await observe(observable, 15000);
         const list = findItemArray(response) || [];
         const want = new Set(defIds);
-        const owned = new Set(list.map(convert(lookup)).filter(Boolean).map((it) => it.definitionId).filter((id) => want.has(id)));
-        return Object.assign(result(response), { success: !!response.success || list.length > 0, owned });
+        const conv = list.map(convert(lookup)).filter(Boolean).filter((it) => want.has(it.definitionId));
+        const owned = new Set(conv.map((it) => it.definitionId));
+        const items = new Map();
+        conv.forEach((it) => { if (!items.has(it.definitionId)) items.set(it.definitionId, it.raw); });
+        return Object.assign(result(response), { success: !!response.success || list.length > 0, owned, items });
+      },
+
+      async moveToClub(raw) {
+        const Pile = G('ItemPile');
+        const svc = G('services').Item;
+        if (!Pile || typeof svc.move !== 'function') return { success: false, status: 0 };
+        try { return result(await observe(svc.move(raw, Pile.CLUB))); } catch (e) { return { success: false, status: e.message }; }
+      },
+
+      // Desafio de SBC aberto agora no Web App (tela do elenco do desafio).
+      sbcChallenge() {
+        try {
+          const main = G('getAppMain');
+          if (typeof main !== 'function') return { error: 'Web App não encontrado' };
+          const queue = [main().getRootViewController()];
+          const seen = new Set();
+          while (queue.length && seen.size < 80) {
+            const c = queue.shift();
+            if (!c || typeof c !== 'object' || seen.has(c)) continue;
+            seen.add(c);
+            for (const k of ['_challenge', 'challenge', '_sbcChallenge', '_currentChallenge']) {
+              const ch = c[k];
+              if (ch && typeof ch === 'object' && ch.squad && typeof ch.squad === 'object') return { challenge: ch, squad: ch.squad, controller: c };
+            }
+            const vm = c._viewmodel || c.viewmodel;
+            if (vm && vm.challenge && vm.challenge.squad) return { challenge: vm.challenge, squad: vm.challenge.squad, controller: c };
+            for (const fn of ['getPresentedViewController', 'getCurrentViewController', 'getCurrentController']) {
+              try { if (typeof c[fn] === 'function') queue.push(c[fn]()); } catch (e) { /* ignora */ }
+            }
+            for (const k of ['childViewControllers', '_childViewControllers', 'currentController', '_currentController', '_squadController', '_challengeController']) {
+              const v = c[k];
+              if (Array.isArray(v)) v.forEach((x) => queue.push(x));
+              else if (v && typeof v === 'object') queue.push(v);
+            }
+          }
+        } catch (e) { return { error: 'erro ' + e.message }; }
+        return { error: 'abra o desafio (a tela do elenco do SBC) no Web App' };
+      },
+
+      // Vagas do elenco do desafio: [{ index, position, item }].
+      sbcSlots(squad) {
+        let list = [];
+        for (const fn of ['getFieldPlayers', 'getPlayers', 'getSlots']) {
+          try { if (typeof squad[fn] === 'function') { list = squad[fn]() || []; if (list.length) break; } } catch (e) { /* ignora */ }
+        }
+        if (!list.length) list = squad._players || squad.players || [];
+        return Array.from(list).slice(0, 11).map((slot, index) => {
+          let pos = null;
+          try {
+            const p = slot && (typeof slot.getPosition === 'function' ? slot.getPosition() : slot.position || slot._position);
+            pos = p && (p.typeName || p.name || (typeof p.id === 'number' ? POSITION_IDS[p.id] : null) || (typeof p === 'string' ? p : null));
+            if (!pos && typeof p === 'number') pos = POSITION_IDS[p];
+          } catch (e) { pos = null; }
+          const item = slot && (slot.item || slot._item || (typeof slot.getItem === 'function' ? slot.getItem() : null));
+          return { index, position: pos ? String(pos).toUpperCase() : '', item: item || null };
+        });
+      },
+
+      // Coloca as cartas nas vagas e salva o desafio (não envia).
+      async sbcPlace(found, picks) {
+        const squad = found.squad;
+        let method = '';
+        try {
+          if (typeof squad.addItemToSlot === 'function') {
+            picks.forEach((p) => squad.addItemToSlot(p.index, p.raw));
+            method = 'addItemToSlot';
+          } else if (typeof squad.setPlayers === 'function') {
+            const cur = this.sbcSlots(squad).map((sl) => sl.item);
+            while (cur.length < 11) cur.push(null);
+            picks.forEach((p) => { cur[p.index] = p.raw; });
+            squad.setPlayers(cur, true);
+            method = 'setPlayers';
+          } else {
+            return { success: false, status: 'não achei a função do Web App que coloca jogadores no elenco' };
+          }
+        } catch (e) {
+          return { success: false, status: 'erro ao colocar: ' + e.message, method };
+        }
+        const sbc = G('services') && G('services').SBC;
+        if (sbc && typeof sbc.saveChallenge === 'function') {
+          try {
+            const r = await observe(sbc.saveChallenge(found.challenge), 15000);
+            return Object.assign(result(r), { method, saved: true });
+          } catch (e) {
+            return { success: false, status: 'erro ao salvar: ' + e.message, method };
+          }
+        }
+        return { success: true, method, saved: false };
       },
 
       // Pilhas da conta: lista de transferências, não atribuídos e lances.
@@ -3294,7 +3385,7 @@
         <div class="card">
           <div class="card-h">🧩 SBC pela solução do FUTBIN</div>
           <p class="hint">1) No Safari, abra no FUTBIN a solução mais barata do SBC e toque no selo verde até aparecerem os preços (são de console).
-            2) Toque em <b>🧩 Enviar ao bot</b>. 3) Volte aqui e toque em <b>Colar solução</b>. Confira os jogadores e quanto pagar por cada um, e crie os alvos.</p>
+            2) Toque em <b>🧩 Enviar ao bot</b>. 3) Volte aqui e toque em <b>Colar solução</b>. 4) Confira quanto pagar por cada um e toque em <b>Comprar os marcados</b> (as compras acontecem aqui mesmo, sem mexer no Sniper). 5) Abra o desafio no Web App e toque em <b>Montar elenco</b>.</p>
           <button class="full price" data-act="sbcPaste">📋 Colar solução do FUTBIN</button>
           <textarea data-el="sbcCode" rows="2" placeholder="Se não colar sozinho: toque e segure aqui → Colar"></textarea>
           <button class="full" data-act="sbcImport">Importar código colado</button>
@@ -3304,10 +3395,16 @@
             <button class="full" data-act="sbcClub">🏠 Conferir no clube</button>
             <button class="full price" data-act="sbcPrices">💲 Preço atual dos marcados</button>
             <button class="full" data-act="sbcUseNow">Usar o preço atual como "pagar até"</button>
-            <label><input type="checkbox" data-el="sbcPauseOthers" checked> Pausar meus outros alvos enquanto isso</label>
-            <button class="full go" data-act="sbcCreate">🎯 Criar alvos no sniper</button>
-            <button class="full no" data-act="sbcClear">Remover alvos deste SBC</button>
+            <div class="ed-actions">
+              <button class="go" data-act="sbcBuy">🛒 Comprar os marcados</button>
+              <button class="no" data-act="sbcStop">Parar</button>
+            </div>
+            <div class="result" data-el="sbcStatusBox" hidden></div>
+            <button class="full price" data-act="sbcAssemble">🧩 Montar elenco no SBC</button>
+            <p class="hint">Montar elenco: abra o desafio no Web App (a tela do elenco do SBC) e toque aqui. O bot coloca as cartas compradas e as que você já tem nas vagas e salva. Confira e envie você mesmo.</p>
+            <div class="bidlog" data-el="sbcLog" hidden></div>
           </div>
+          <button class="full" data-act="sbcLegacy" data-el="sbcLegacy" hidden>Tirar do Sniper os alvos de SBC antigos</button>
           <button class="full" data-act="sbcResume" data-el="sbcResume" hidden>Reativar meus alvos pausados</button>
         </div>
       </section>
@@ -4190,7 +4287,8 @@
     function importSbc(text) {
       const r = decodeSbc(text);
       if (r.error) return win.alert('Não deu para importar: ' + r.error + '.');
-      r.sbc.players.forEach((p) => { p.buy = true; p.max = p.price >= 200 ? p.price : 0; p.owned = ''; });
+      if (sbcEngine.running) return win.alert('Pare as compras do SBC atual antes de importar outro.');
+      r.sbc.players.forEach((p) => { p.buy = true; p.max = p.price >= 200 ? p.price : 0; p.owned = ''; p.bought = false; });
       app.state.sbc = r.sbc;
       save();
       el('sbcCode').value = '';
@@ -4211,10 +4309,9 @@
 
     function sbcStatus(p) {
       if (p.owned) return '✅ você já tem (' + p.owned + ')';
-      const t = app.state.targets.find((x) => x.sbc && x.definitionId === p.definitionId);
-      if (!t) return '';
-      if (targetDone(t)) return '✅ comprado';
-      return t.enabled ? '🎯 no sniper até ' + fmt(t.maxBuy) : '🎯 alvo desligado';
+      if (p.bought) return '✅ comprado' + (p.paid ? ' por ' + fmt(p.paid) : '');
+      if (sbcEngine.running && p.buy && sbcBuying.has(p.definitionId)) return '🔎 procurando até ' + fmt(p.max);
+      return '';
     }
 
     function sbcRowHtml(p, i) {
@@ -4233,6 +4330,7 @@
       const s = app.state.sbc;
       el('sbcActions').hidden = !s;
       el('sbcResume').hidden = !app.state.targets.some((t) => t.pausedForSbc);
+      el('sbcLegacy').hidden = !app.state.targets.some((t) => t.sbc);
       if (!s) {
         el('sbcList').innerHTML = '<p class="hint">Nenhuma solução importada ainda.</p>';
         return;
@@ -4330,37 +4428,147 @@
       if (!n) win.alert('Nenhum preço atual consultado ainda. Toque em "💲 Preço atual dos marcados" antes.');
     }
 
-    function sbcCreateTargets() {
+    // Compras do SBC: um bot só do módulo, com os jogadores da solução.
+    // Nada vai para o Sniper.
+    let sbcTraceLines = [];
+    function sbcTrace(msg, level) {
+      const box = el('sbcLog');
+      box.hidden = false;
+      sbcTraceLines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
+      if (sbcTraceLines.length > 80) sbcTraceLines.length = 80;
+      box.innerHTML = sbcTraceLines.join('');
+    }
+
+    let sbcTargets = [];
+    const sbcBuying = new Set();
+    const sbcEngine = new Autobuyer({
+      adapter,
+      getState: () => ({ settings: Object.assign({}, app.state.settings, { maxBuys: 0, budget: 0 }), targets: sbcTargets }),
+      log: (m, l) => { sbcTrace(m, l); log('SBC: ' + m, l); },
+      onPurchase: (pu) => {
+        const s = app.state.sbc;
+        const p = s && s.players.find((x) => x.definitionId === pu.definitionId && !x.bought);
+        if (p) {
+          p.bought = true;
+          p.itemId = pu.itemId;
+          p.paid = pu.price;
+          sbcBuying.delete(p.definitionId);
+        }
+        save();
+        renderSbc();
+      },
+      onTargetsChanged: () => { save(); renderSbc(); },
+      onChange: () => renderSbcStatus(),
+    });
+
+    function renderSbcStatus() {
+      const box = el('sbcStatusBox');
+      const s = app.state.sbc;
+      if (!s) { box.hidden = true; return; }
+      const want = s.players.filter((p) => p.buy && !p.owned);
+      const got = want.filter((p) => p.bought);
+      if (!sbcEngine.running && !got.length && !sbcEngine.stopReason) { box.hidden = true; return; }
+      box.hidden = false;
+      const st = sbcEngine.stats || {};
+      box.innerHTML = (sbcEngine.running ? '🟢 Comprando' : '⏹ Parado' + (sbcEngine.stopReason ? ' (' + escapeHtml(sbcEngine.stopReason) + ')' : '')) +
+        ' · comprados <b>' + got.length + ' de ' + want.length + '</b> · gasto ' + fmt(got.reduce((n, p) => n + (p.paid || 0), 0)) +
+        (st.searches ? ' · ' + st.searches + ' busca(s)' : '');
+    }
+
+    async function sbcStartBuying() {
       const s = app.state.sbc;
       if (!s) return;
-      const buy = s.players.filter((p) => p.buy);
-      if (!buy.length) return win.alert('Marque pelo menos um jogador para comprar.');
+      if (engine.running) return win.alert('Pare o Sniper antes: os dois buscando juntos chamam a atenção da EA.');
+      if (modBusy) return win.alert('Espere o módulo de ' + modBusy + ' terminar.');
+      const buy = s.players.filter((p) => p.buy && !p.owned && !p.bought);
+      if (!buy.length) return win.alert(s.players.some((p) => p.bought) ? 'Todos os marcados já foram comprados.' : 'Marque pelo menos um jogador para comprar.');
       const bad = buy.filter((p) => !(p.max >= 200));
       if (bad.length) return win.alert('Informe quanto pagar (mínimo 200) por: ' + bad.map((p) => p.name).join(', ') + '.');
-      const active = (p) => app.state.targets.some((t) => t.sbc && t.definitionId === p.definitionId && !targetDone(t));
-      const fresh = buy.filter((p) => !active(p));
-      const already = buy.length - fresh.length;
-      if (!fresh.length) return win.alert('Esses jogadores já estão no sniper.');
-      const pauseOthers = el('sbcPauseOthers').checked;
-      const total = fresh.reduce((n, p) => n + p.max, 0);
-      if (!win.confirm('Criar ' + fresh.length + ' alvo(s) no sniper (1 carta de cada, sem revenda):\n\n' +
-        fresh.map((p) => p.name + ' ' + p.rating + ' até ' + fmt(p.max)).join('\n') +
-        '\n\nTotal: até ' + fmt(total) + ' moedas.' +
-        (already ? '\n(' + already + ' já estavam no sniper.)' : '') +
-        (pauseOthers ? '\nSeus outros alvos serão pausados.' : '') +
+      const total = buy.reduce((n, p) => n + p.max, 0);
+      if (!win.confirm('Comprar ' + buy.length + ' jogador(es) para o SBC (1 de cada, só aquela versão):\n\n' +
+        buy.map((p) => p.name + ' ' + p.rating + ' até ' + fmt(p.max)).join('\n') + '\n\nTotal: até ' + fmt(total) + ' moedas.' +
         (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
-      if (pauseOthers) {
-        app.state.targets.forEach((t) => {
-          if (!t.sbc && t.enabled) { t.enabled = false; t.pausedForSbc = true; }
-        });
-      }
       const now = Date.now();
-      fresh.forEach((p) => app.state.targets.push(sbcTarget(p, s.name, p.max, now)));
+      sbcBuying.clear();
+      sbcTargets = buy.map((p) => {
+        sbcBuying.add(p.definitionId);
+        return Object.assign(sbcTarget(p, s.name, p.max, now), { id: 'sbc-' + p.definitionId });
+      });
+      modBusy = 'SBC';
+      sbcTraceLines = [];
+      sbcTrace('Comprando ' + buy.length + ' jogador(es) para ' + s.name + '.', 'info');
+      renderSbc();
+      try {
+        await sbcEngine.start();
+      } finally {
+        modBusy = '';
+        sbcBuying.clear();
+        renderSbc();
+        renderSbcStatus();
+      }
+      const left = s.players.filter((p) => p.buy && !p.owned && !p.bought);
+      if (!left.length && s.players.some((p) => p.bought)) {
+        sbcTrace('Tudo comprado! Abra o desafio no Web App e toque em "Montar elenco no SBC".', 'success');
+      } else if (left.length) {
+        sbcTrace('Faltam ' + left.length + ': ' + left.map((p) => p.name).join(', ') + '. Toque em Comprar de novo para continuar (ou suba o "Pagar até").', 'warn');
+      }
+    }
+
+    // Monta o elenco do desafio aberto no Web App com as cartas do SBC.
+    async function sbcAssemble(btn) {
+      const s = app.state.sbc;
+      if (!s) return;
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'função indisponível' };
+      if (found.error) return win.alert('Não achei o desafio: ' + found.error + '.');
+      modBusy = 'SBC';
+      btn.disabled = true;
+      try {
+        const slots = adapter.sbcSlots(found.squad);
+        sbcTrace('Desafio encontrado: ' + slots.length + ' vaga(s) (' + slots.map((x) => x.position || '?').join(', ') + ').', 'info');
+        const ids = s.players.map((p) => p.definitionId);
+        // Cartas: compradas (Não atribuídos) e as que já estão no clube.
+        const raws = new Map();
+        const un = await readPile('unassigned').catch(() => null);
+        if (un && un.ok) {
+          for (const it of un.items) {
+            if (!ids.includes(it.definitionId) || raws.has(it.definitionId) || !it.raw) continue;
+            const mv = await adapter.moveToClub(it.raw);
+            sbcTrace(it.name + ': ' + (mv.success ? 'mandei para o clube.' : 'não consegui mandar para o clube (erro ' + mv.status + '); tento usar assim mesmo.'), mv.success ? 'muted' : 'warn');
+            raws.set(it.definitionId, it.raw);
+            await sleepMs(400);
+          }
+        }
+        const club = await adapter.clubOwned(ids.filter((id) => !raws.has(id)), deps.lookup).catch(() => ({ items: new Map() }));
+        (club.items || new Map()).forEach((raw, id) => { if (!raws.has(id)) raws.set(id, raw); });
+        const players = s.players.filter((p) => raws.has(p.definitionId)).map((p) => Object.assign({}, p, { raw: raws.get(p.definitionId) }));
+        const missing = s.players.filter((p) => !raws.has(p.definitionId));
+        if (missing.length) sbcTrace('Não achei no clube/Não atribuídos: ' + missing.map((p) => p.name + ' ' + p.rating).join(', ') + '.', 'warn');
+        if (!players.length) { win.alert('Não achei nenhuma carta do SBC no clube nem em Não atribuídos.'); return; }
+        const plan = planSbcSlots(slots.length ? slots : players.map((p, i) => ({ index: i, position: p.position })), players);
+        plan.forEach((x) => sbcTrace('Vaga ' + (x.index + 1) + (slots[x.index] && slots[x.index].position ? ' (' + slots[x.index].position + ')' : '') + ': ' +
+          x.player.name + ' ' + x.player.rating + (x.match ? '' : ' — posição diferente da solução'), x.match ? 'muted' : 'warn'));
+        const r = await adapter.sbcPlace(found, plan.map((x) => ({ index: x.index, raw: x.player.raw })));
+        if (r.success) {
+          sbcTrace('✅ Elenco montado (' + plan.length + ' carta(s), via ' + r.method + (r.saved ? ', salvo' : '') + '). Se a tela não mudou, volte e abra o desafio de novo. Confira e envie você mesmo.', 'success');
+          log('SBC: elenco montado com ' + plan.length + ' carta(s).', 'success');
+        } else {
+          sbcTrace('❌ Não consegui montar: ' + r.status + (r.method ? ' (via ' + r.method + ')' : '') + '. Monte à mão: as cartas já estão no clube.', 'error');
+        }
+      } finally {
+        modBusy = '';
+        btn.disabled = false;
+      }
+    }
+
+    function sbcClearLegacy() {
+      const old = app.state.targets.filter((t) => t.sbc);
+      if (!old.length) return;
+      if (!win.confirm('Tirar do Sniper ' + old.length + ' alvo(s) de SBC criados pela versão anterior?')) return;
+      app.state.targets = app.state.targets.filter((t) => !t.sbc);
       save();
       renderTargets();
       renderSbc();
-      log('SBC ' + s.name + ': ' + fresh.length + ' alvo(s) criado(s), até ' + fmt(total) + ' moedas.', 'success');
-      win.alert('Alvos criados. Toque em Iniciar para o sniper comprar. Cada alvo do SBC se desliga sozinho quando a carta é comprada; as cartas ficam em Não atribuídos.');
     }
 
     function sbcResume() {
@@ -4372,17 +4580,6 @@
       renderTargets();
       renderSbc();
       log(n + ' alvo(s) reativado(s).', 'success');
-    }
-
-    function sbcClear() {
-      const s = app.state.sbc;
-      const mine = app.state.targets.filter((t) => t.sbc && (!s || t.sbc === s.name));
-      if (!mine.length) return win.alert('Não há alvos deste SBC no sniper.');
-      if (!win.confirm('Remover ' + mine.length + ' alvo(s) do SBC do sniper?')) return;
-      app.state.targets = app.state.targets.filter((t) => !mine.includes(t));
-      save();
-      renderTargets();
-      renderSbc();
     }
 
     // Venda: carrega, agrupa e mostra cada grupo com quantidade e preço.
@@ -4815,9 +5012,11 @@
         if (a === 'sbcClub') sbcCheckClub(act);
         if (a === 'sbcPrices') sbcPrices(act);
         if (a === 'sbcUseNow') sbcUseNow();
-        if (a === 'sbcCreate') sbcCreateTargets();
+        if (a === 'sbcBuy') sbcStartBuying();
+        if (a === 'sbcStop') { if (sbcEngine.running) sbcEngine.stop(); }
+        if (a === 'sbcAssemble') sbcAssemble(act);
         if (a === 'sbcResume') sbcResume();
-        if (a === 'sbcClear') sbcClear();
+        if (a === 'sbcLegacy') sbcClearLegacy();
         if (a === 'modStop') { modStop = true; log('Parando o módulo…', 'warn'); }
         return;
       }
@@ -5218,6 +5417,32 @@
     };
   }
 
+  // Posição da vaga do elenco → posição "simples" (RCB → CB, LS → ST...).
+  const SLOT_ALIASES = { RCB: 'CB', LCB: 'CB', SW: 'CB', RCM: 'CM', LCM: 'CM', RDM: 'CDM', LDM: 'CDM', RAM: 'CAM', LAM: 'CAM', RS: 'ST', LS: 'ST' };
+  function simplePosition(p) {
+    const up = String(p || '').toUpperCase();
+    return SLOT_ALIASES[up] || up;
+  }
+
+  // Distribui os jogadores da solução nas vagas do desafio: primeiro quem
+  // tem a mesma posição da vaga, depois o resto nas vagas que sobrarem.
+  function planSbcSlots(slots, players) {
+    const free = players.slice();
+    const out = [];
+    const taken = new Set();
+    for (const slot of slots) {
+      const want = simplePosition(slot.position);
+      const i = free.findIndex((p) => want && simplePosition(p.position) === want);
+      if (i >= 0) { out.push({ index: slot.index, player: free[i], match: true }); taken.add(slot.index); free.splice(i, 1); }
+    }
+    for (const slot of slots) {
+      if (taken.has(slot.index) || !free.length) continue;
+      out.push({ index: slot.index, player: free.shift(), match: false });
+      taken.add(slot.index);
+    }
+    return out.sort((a, b) => a.index - b.index);
+  }
+
   // Botão "Enviar ao bot" nas páginas do FUTBIN.
   function bootFutbin(win) {
     const doc = win.document;
@@ -5379,7 +5604,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

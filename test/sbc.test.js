@@ -69,3 +69,22 @@ test('sniper ignora outra versão do jogador e compra a da solução', async () 
   assert.deepEqual(bought, [[2, 1100]]);
   assert.equal(t.bought, 1);
 });
+
+test('montar elenco: cada jogador vai para a vaga da posição dele', () => {
+  const slots = ['ST', 'LW', 'LM', 'RCM', 'LCM', 'RM', 'CAM', 'LCB', 'RCB', 'LB', 'GK'].map((position, index) => ({ index, position }));
+  const players = [
+    { name: 'GK1', position: 'GK' }, { name: 'ST1', position: 'ST' }, { name: 'CM1', position: 'CM' }, { name: 'CM2', position: 'CM' },
+    { name: 'CB1', position: 'CB' }, { name: 'X', position: 'RW' },
+  ];
+  const plan = ab.planSbcSlots(slots, players);
+  const at = (i) => (plan.find((x) => x.index === i) || {}).player;
+  assert.equal(at(0).name, 'ST1');
+  assert.equal(at(10).name, 'GK1');
+  assert.equal(at(3).name, 'CM1');
+  assert.equal(at(4).name, 'CM2');
+  assert.equal(at(7).name, 'CB1');
+  assert.equal(plan.length, 6);
+  const extra = plan.find((x) => x.player.name === 'X');
+  assert.equal(extra.match, false);
+  assert.equal(ab.simplePosition('rcb'), 'CB');
+});

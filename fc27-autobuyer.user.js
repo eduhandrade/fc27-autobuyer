@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.6.0
+// @version      1.6.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.6.0';
+  const SCRIPT_VERSION = '1.6.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -214,6 +214,41 @@
     return ZONES.find((z) => v === z[0] || v.startsWith(z[0].slice(0, 5))) || null;
   }
 
+  // Posição da busca do Web App em qualquer formato (texto, número, lista,
+  // outro nome de campo) → { position: 'CB' } ou { zone: 'defense' }.
+  const POSITION_KEYS = ['position', 'zone', 'pos', 'positions', 'preferredPosition', 'posGroup', 'positionGroup', '_position', '_zone'];
+  const ALL_POSITIONS = ['GK', 'RWB', 'LWB', 'RB', 'LB', 'CB', 'CDM', 'CM', 'CAM', 'RM', 'LM', 'RW', 'LW', 'RF', 'LF', 'CF', 'ST'];
+  function readPositionFilter(c) {
+    const out = { position: '', zone: '', key: '' };
+    if (!c) return out;
+    for (const key of POSITION_KEYS) {
+      let v = c[key];
+      if (Array.isArray(v)) v = v.length === 1 ? v[0] : null;
+      if (v == null || v === '' || v === -1 || v === '-1') continue;
+      // Número em campo de grupo (zone) é formato próprio da EA: não é posição.
+      const groupKey = /zone|group/i.test(key);
+      if (groupKey && (typeof v === 'number' || /^\d+$/.test(String(v)))) continue;
+      if (typeof v === 'number') {
+        const name = POSITION_IDS[v];
+        if (name && ALL_POSITIONS.includes(name)) { out.position = name; out.key = key; return out; }
+        continue;
+      }
+      const t = String(v).trim();
+      if (!t || /^any$/i.test(t)) continue;
+      if (/^\d+$/.test(t)) {
+        const name = POSITION_IDS[parseInt(t, 10)];
+        if (name && ALL_POSITIONS.includes(name)) { out.position = name; out.key = key; return out; }
+        continue;
+      }
+      const up = t.toUpperCase();
+      if (ALL_POSITIONS.includes(up)) { out.position = up; out.key = key; return out; }
+      if (/^def/i.test(t)) { out.zone = 'defense'; out.key = key; return out; }
+      if (/^mid/i.test(t)) { out.zone = 'midfield'; out.key = key; return out; }
+      if (/^(att|fwd|forw|ata)/i.test(t)) { out.zone = 'attacker'; out.key = key; return out; }
+    }
+    return out;
+  }
+
   function zoneLabel(value) {
     const z = zoneInfo(value);
     return z ? z[1] : 'Grupo de posição da busca';
@@ -387,6 +422,17 @@
     if (kind === 'player') {
       const out = kindFromCriteria(base) === 'player' ? Object.assign({}, base) : {};
       delete out.category;
+      // Se a posição escolhida é a mesma da busca do Web App, mantém o campo
+      // original (do jeito que a EA espera); se mudou, troca pelo padrão.
+      const basePos = readPositionFilter(out);
+      const wantPos = isEmptyValue(values.position) ? '' : String(values.position).toUpperCase();
+      const wantZone = isEmptyValue(values.zone) ? '' : (zoneInfo(values.zone) || [values.zone])[0];
+      const baseZone = basePos.zone ? basePos.zone : (zoneInfo(out.zone) || [''])[0];
+      if (basePos.key && wantPos === basePos.position && wantZone === baseZone) {
+        values = Object.assign({}, values, { position: out.position, zone: out.zone });
+      } else {
+        POSITION_KEYS.filter((k) => k !== 'position' && k !== 'zone').forEach((k) => { delete out[k]; });
+      }
       for (const key of PLAYER_FILTER_KEYS) {
         const v = values[key];
         if (isEmptyValue(v)) delete out[key];
@@ -491,14 +537,15 @@
         if (got == null) return 'não deu para confirmar ' + article + ' ' + noun;
         return got === want ? null : noun + ' diferente';
       };
-      if (!isEmptyValue(c.position)) {
+      const pf = readPositionFilter(c);
+      if (pf.position) {
         const pos = positionsOf(it);
         if (!pos.length) return 'não deu para confirmar a posição';
-        if (!pos.includes(String(c.position).toUpperCase())) return 'posição diferente';
+        if (!pos.includes(pf.position)) return 'posição diferente';
       }
       // Grupo de posição: confere quando sabemos quais posições entram nele;
       // se o valor for outro formato da EA, vale o filtro da própria busca.
-      const zone = isEmptyValue(c.zone) ? null : zoneInfo(c.zone);
+      const zone = pf.zone ? zoneInfo(pf.zone) : (isEmptyValue(c.zone) ? null : zoneInfo(c.zone));
       if (zone) {
         const pos = positionsOf(it);
         if (!pos.length) return 'não deu para confirmar a posição';
@@ -535,8 +582,10 @@
     if (t.kind === 'mgrleague') return ['Liga de técnico: ' + (c.league > 0 ? nameFor('league', c.league, labels, names) : '?')];
     const parts = [];
     if (c.maskedDefId) parts.push(t.kind === 'manager' ? (labels.player || 'técnico #' + c.maskedDefId) : nameFor('player', c.maskedDefId, labels, names));
-    if (c.position && c.position !== 'any') parts.push(c.position);
-    if (!isEmptyValue(c.zone)) parts.push(zoneLabel(c.zone));
+    const pf = readPositionFilter(c);
+    if (pf.position) parts.push(pf.position);
+    else if (pf.zone) parts.push(zoneLabel(pf.zone));
+    else if (!isEmptyValue(c.zone)) parts.push(zoneLabel(c.zone));
     if (c.playStyle > 0) parts.push('Química ' + chemStyleName(c.playStyle));
     if (c.club > 0) parts.push(nameFor('club', c.club, labels, names));
     if (c.league > 0) parts.push(nameFor('league', c.league, labels, names));
@@ -3219,6 +3268,7 @@
             <button class="no" data-act="modStop">Parar</button>
             <button data-act="bidCollect">Conferir lances</button>
           </div>
+          <button class="full price" data-act="bidStopList">⏹ Parar lances e anunciar as ganhas agora</button>
           <div class="result" data-el="bidResult" hidden></div>
           <div class="bidlog" data-el="bidLog" hidden></div>
           <p class="hint">"Conferir lances" olha a sua lista de observação: as cartas ganhas vão para a lista de transferências, entram no Lucro com o valor do lance e, se você preencheu "Revender as cartas ganhas por", são anunciadas por esse preço (1 hora).</p>
@@ -3451,8 +3501,8 @@
           kind: kind || null,
           base: Object.assign({}, c),
           player: c.maskedDefId || 0,
-          position: c.position && c.position !== 'any' ? c.position : '',
-          zone: isEmptyValue(c.zone) ? '' : c.zone,
+          position: readPositionFilter(c).position,
+          zone: readPositionFilter(c).position ? '' : (readPositionFilter(c).zone || (isEmptyValue(c.zone) ? '' : c.zone)),
           chem: kind === 'chemstyle' ? 0 : style,
           consumable: kind === 'player' ? 0 : style,
           level: c.level && c.level !== 'any' ? c.level : '',
@@ -4028,6 +4078,7 @@
       el('bidResult').hidden = false;
       el('bidResult').textContent = 'Dando lances…';
       log('Lances em massa iniciados.');
+      bidListNow = false;
       const trace = bidTracer();
       app.state.bidSession = { start: Date.now(), ids: [], until: 0 };
       save();
@@ -4049,25 +4100,35 @@
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
         // Espera os leilões acabarem e confere/anuncia as ganhas.
         const sess = bidSession();
-        if (el('bidAutoCollect').checked && !modStop && sess.ids.length && !/captcha|sessão|limitad/i.test(r.stopReason)) {
+        if (bidListNow) {
+          trace('Lances parados por você: conferindo e anunciando as cartas já ganhas (leilões ainda abertos ficam para depois).', 'info');
+          modStop = false;
+          await runCollect(trace);
+        } else if (el('bidAutoCollect').checked && !modStop && sess.ids.length && !/captcha|sessão|limitad/i.test(r.stopReason)) {
           const until = sess.until + 20000;
           trace('Esperando os leilões acabarem (até ' + new Date(until).toLocaleTimeString('pt-BR') + ') para conferir' +
             (bidSellPlan() ? ' e anunciar' : '') + '. Toque em Parar para cancelar.', 'info');
           let lastNote = 0;
-          while (!modStop && Date.now() < until) {
+          while (!modStop && !bidListNow && Date.now() < until) {
             if (Date.now() - lastNote > 60000) {
               lastNote = Date.now();
               trace('Faltam ~' + Math.max(1, Math.ceil((until - Date.now()) / 60000)) + ' min para conferir.', 'muted');
             }
             await sleepMs(1000);
           }
-          if (!modStop) await runCollect(trace);
+          if (bidListNow) {
+            modStop = false;
+            trace('Anunciando agora as cartas já ganhas (leilões ainda abertos ficam para depois).', 'info');
+            await runCollect(trace);
+          } else if (!modStop) await runCollect(trace);
           else trace('Conferência automática cancelada.', 'warn');
         }
       } finally {
         modBusy = '';
       }
     }
+
+    let bidListNow = false;
 
     // Lances desta sessão: guardados para anunciar só as cartas ganhas neles.
     function bidSession() {
@@ -4493,7 +4554,7 @@
       const kind = kindFromCriteria(criteria);
       if (kind !== 'player') card = null;
       // Ajuda a diagnosticar tipos novos: mostra no Log os campos da busca.
-      if (!kind || kind === 'mgrleague') log('Campos da busca capturada: ' + JSON.stringify(criteria), 'info');
+      log('Campos da busca capturada: ' + JSON.stringify(criteria), 'info');
       app.captured = criteria;
       app.capturedCard = card || null;
       if (!card) {
@@ -4601,9 +4662,19 @@
     // Mantém a tela do iPhone acesa enquanto o bot roda.
     let wakeLock = null;
     function requestWakeLock() {
-      if (!engine.running || !win.navigator.wakeLock) return;
-      win.navigator.wakeLock.request('screen').then((l) => { wakeLock = l; }).catch(() => {});
+      if (!(engine.running || modBusy) || !win.navigator.wakeLock || wakeLock) return;
+      win.navigator.wakeLock.request('screen').then((l) => {
+        wakeLock = l;
+        l.addEventListener && l.addEventListener('release', () => { if (wakeLock === l) wakeLock = null; });
+      }).catch(() => {});
     }
+    // Vale também para os módulos (lances, venda, preços): enquanto algo
+    // estiver rodando ou esperando, a tela não apaga.
+    win.setInterval(() => {
+      const want = engine.running || !!modBusy;
+      if (want && doc.visibilityState === 'visible') requestWakeLock();
+      if (!want && wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    }, 3000);
     doc.addEventListener('visibilitychange', () => {
       if (doc.visibilityState === 'visible') requestWakeLock();
       else if (engine.running) log('Aba em segundo plano: o navegador pode pausar o bot.', 'warn');
@@ -4721,6 +4792,17 @@
         }
         if (a === 'bidStart') startBids();
         if (a === 'bidCollect') collectBids();
+        if (a === 'bidStopList') {
+          if (modBusy === 'lances') {
+            bidListNow = true;
+            modStop = true;
+            log('Parando os lances para anunciar as cartas ganhas…', 'warn');
+          } else if (!modBusy) {
+            collectBids();
+          } else {
+            win.alert('Espere o módulo de ' + modBusy + ' terminar.');
+          }
+        }
         if (a === 'sellLoad') loadSellable();
         if (a === 'sellStart') startSell();
         if (a === 'sellMarket') {
@@ -5297,7 +5379,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

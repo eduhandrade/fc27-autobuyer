@@ -202,3 +202,26 @@ test('grupos de posição: defensores, meio-campistas e atacantes', () => {
   assert.equal(ab.mismatchReason({ kind: 'player', position: 'ST' }, raw), null);
   assert.deepEqual(ab.targetParts(t), ['Defensores']);
 });
+
+test('posição da busca do Web App em outros formatos é reconhecida', () => {
+  assert.deepEqual(ab.readPositionFilter({ position: 'cb' }), { position: 'CB', zone: '', key: 'position' });
+  assert.equal(ab.readPositionFilter({ position: 25 }).position, 'ST');
+  assert.equal(ab.readPositionFilter({ position: '5' }).position, 'CB');
+  assert.equal(ab.readPositionFilter({ positions: ['CAM'] }).position, 'CAM');
+  assert.equal(ab.readPositionFilter({ position: 'Defenders' }).zone, 'defense');
+  assert.equal(ab.readPositionFilter({ zone: 'midfielders' }).zone, 'midfield');
+  assert.equal(ab.readPositionFilter({ posGroup: 'attackers' }).zone, 'attacker');
+  assert.equal(ab.readPositionFilter({ zone: 7 }).zone, '');
+  assert.equal(ab.readPositionFilter({ position: 'any', zone: -1 }).key, '');
+  // Mesma posição do Web App: mantém o campo original da EA.
+  const kept = ab.criteriaForKind('player', { type: 'player', pos: 'CB' }, { position: 'CB', zone: 'any' });
+  assert.equal(kept.pos, 'CB');
+  // Trocou a posição: usa o campo padrão e tira o antigo.
+  const changed = ab.criteriaForKind('player', { type: 'player', pos: 'CB' }, { position: 'ST', zone: 'any' });
+  assert.equal(changed.pos, undefined);
+  assert.equal(changed.position, 'ST');
+  // Conferência da carta usa a posição normalizada.
+  const t = { kind: 'player', criteria: { type: 'player', position: 'cb' }, maxBuy: 9000 };
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'CB' }, t), null);
+  assert.equal(ab.mismatchReason({ kind: 'player', position: 'ST' }, t), 'posição diferente');
+});

@@ -149,3 +149,29 @@ test('lances: mínimo escolhido e lance exato', () => {
   // Mínimo que chega no compre já: pula.
   assert.match(ab.bidProblem(it({ buyNow: 1800 }), { maxBid: 2000, minBid: 1800 }), /compra imediata/);
 });
+
+test('lucro: cartas ganhas em leilão contam', () => {
+  // 1) Ganha na lista de observação (vista ao abrir "Transfer Targets").
+  const ledger = {};
+  const n = ab.recordWonBids(ledger, [
+    { id: 11, name: 'Bremer', rating: 86, tradeState: 'closed', bidState: 'highest', currentBid: 9000 },
+    { id: 12, name: 'Outro', tradeState: 'closed', bidState: 'outbid', currentBid: 9500 },
+  ]);
+  assert.equal(n, 1);
+  ab.syncLedger(ledger, [{ id: 11, name: 'Bremer', tradeState: 'closed', buyNow: 11000 }], 5, 'transfer');
+  assert.equal(ledger.i11.ignored, false);
+  assert.equal(ab.ledgerSummary(ledger).profit, 10450 - 9000);
+  assert.equal(ledger.i12, undefined);
+
+  // 2) Lance do bot, carta mandada direto para a lista sem passar pelo bot.
+  const l2 = {};
+  ab.syncLedger(l2, [{ id: 21, name: 'Bremer', lastSalePrice: 0, tradeState: 'closed', buyNow: 11000 }], 6, 'transfer', { i21: { amount: 8800, at: 1 } });
+  assert.equal(l2.i21.ignored, undefined);
+  assert.equal(l2.i21.cost, 8800);
+  assert.equal(ab.ledgerSummary(l2).profit, 10450 - 8800);
+
+  // 3) Registro antigo de "Conferir lances" que a versão anterior tirou do lucro volta a contar.
+  const l3 = ab.migrateLedger({ i31: { itemId: 31, source: 'lance', cost: 9000, status: 'vendida', soldFor: 11000, origin: 'clube', ignored: true, autoIgnored: true } });
+  assert.equal(l3.i31.ignored, false);
+  assert.equal(ab.ledgerSummary(l3).profit, 1450);
+});

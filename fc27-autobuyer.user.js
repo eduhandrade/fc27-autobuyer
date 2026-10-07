@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.5.4
+// @version      1.5.5
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.5.4';
+  const SCRIPT_VERSION = '1.5.5';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1438,6 +1438,10 @@
       boughtAt: e.at || cur.boughtAt || Date.now(),
       status: cur.status || 'comprada',
       targetId: e.targetId || cur.targetId || undefined,
+      // Compra (do bot ou lance ganho) sempre conta no lucro.
+      origin: e.source || cur.source || 'bot',
+      ignored: false,
+      autoIgnored: false,
     });
     return ledger[key];
   }
@@ -1449,13 +1453,37 @@
   // pile: de onde vieram as cartas ('transfer' ou 'unassigned'). Carta que o
   // bot não comprou e apareceu primeiro na lista de transferências veio do
   // seu clube/elenco: fica registrada, mas não conta no lucro.
-  function syncLedger(ledger, items, now, pile) {
+  // bids: lances dados pelo bot ({ 'i'+itemId: { amount } }); carta ganha
+  // num desses lances é compra, mesmo indo direto para a lista.
+  function syncLedger(ledger, items, now, pile, bids) {
     now = now || Date.now();
     const changes = { added: 0, sold: [] };
     for (const it of items || []) {
       if (!(it.id > 0)) continue;
       const key = ledgerKey(it.id);
       let e = ledger[key];
+      const bid = bids && bids[key];
+      if (!e && bid) {
+        e = ledger[key] = {
+          itemId: it.id,
+          name: it.name,
+          rating: it.rating || 0,
+          definitionId: it.definitionId || 0,
+          cost: it.lastSalePrice > 0 ? it.lastSalePrice : bid.amount || 0,
+          source: 'lance',
+          boughtAt: bid.at || now,
+          status: 'comprada',
+          origin: 'lance',
+          targetId: bid.targetId || undefined,
+        };
+        changes.added++;
+      } else if (bid && e && e.autoIgnored) {
+        e.ignored = false;
+        e.autoIgnored = false;
+        e.source = 'lance';
+        e.origin = 'lance';
+        if (!(e.cost > 0)) e.cost = bid.amount || 0;
+      }
       if (!e) {
         e = ledger[key] = {
           itemId: it.id,
@@ -1499,13 +1527,33 @@
   // jogador do elenco mandado para venda). Agora ficam fora, até você marcar.
   function migrateLedger(ledger) {
     for (const e of Object.values(ledger || {})) {
-      if (!e || e.origin) continue;
-      if (e.source === 'bot') { e.origin = 'bot'; continue; }
+      if (!e) continue;
+      // Lances ganhos (botão "Conferir lances") também são compras: contam.
+      if (e.source === 'bot' || e.source === 'lance') {
+        if (e.autoIgnored) { e.ignored = false; e.autoIgnored = false; }
+        e.origin = e.origin && e.origin !== 'clube' ? e.origin : e.source;
+        continue;
+      }
+      if (e.origin) continue;
       e.origin = 'clube';
       e.ignored = true;
       e.autoIgnored = true;
     }
     return ledger;
+  }
+
+  // Lista de observação: cartas ganhas em leilão entram como compra.
+  function recordWonBids(ledger, items) {
+    let n = 0;
+    for (const it of items || []) {
+      if (!(it.id > 0) || watchStatus(it) !== 'ganhou') continue;
+      const cur = ledger[ledgerKey(it.id)];
+      if (cur && (cur.source === 'lance' || cur.source === 'bot') && !cur.ignored) continue;
+      recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId,
+        price: it.currentBid, source: 'lance', at: cur && cur.boughtAt });
+      n++;
+    }
+    return n;
   }
 
   // Resultado das compras de um alvo: as registradas com o alvo e, das mais
@@ -2205,6 +2253,7 @@
           res.bids++;
           res.coinsCommitted += pick.amount;
           log('Lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
+          if (o.onBid) o.onBid(pick.item, pick.amount);
           trace('   ✅ lance de ' + fmt(pick.amount) + ' aceito.', 'success');
         } else {
           const kind = classifyStatus(bid.status);
@@ -2807,6 +2856,16 @@
     return Object.assign({}, t, { kind: kindFromCriteria(t.criteria), enabled: false, needsReview: true });
   }
 
+  // Lances dados pelo bot, guardados por 14 dias para reconhecer as cartas ganhas.
+  function pruneBids(bids) {
+    const out = {};
+    const limit = Date.now() - 14 * 24 * 3600 * 1000;
+    for (const [k, v] of Object.entries(bids && typeof bids === 'object' ? bids : {})) {
+      if (v && v.at > limit) out[k] = v;
+    }
+    return out;
+  }
+
   function createStore(storage) {
     return {
       load() {
@@ -2830,6 +2889,7 @@
           history: Array.isArray(saved.history) ? saved.history : [],
           ledger: migrateLedger(saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {}),
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
+          bids: pruneBids(saved.bids),
         };
       },
       save(state) {
@@ -3836,7 +3896,7 @@
     }
 
     function applySync(items, quiet, pile) {
-      const ch = syncLedger(ledger(), items, Date.now(), pile || 'transfer');
+      const ch = syncLedger(ledger(), items, Date.now(), pile || 'transfer', app.state.bids);
       ch.sold.forEach((e) => {
         const p = e.ignored ? null : entryProfit(e);
         log('Vendida: ' + e.name + ' por ' + fmt(e.soldFor) + (p == null ? '' : ' · lucro ' + (p > 0 ? '+' : '') + fmt(p) + ' (já sem os 5% da EA)'), 'success');
@@ -3927,7 +3987,13 @@
       };
       trace('Começando: ' + describeTarget(plan.target, names) + '.', 'info');
       try {
-        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, isStopped: () => modStop });
+        const onBid = (it, amount) => {
+          if (!(it.id > 0)) return;
+          app.state.bids = app.state.bids || {};
+          app.state.bids[ledgerKey(it.id)] = { amount, at: Date.now(), name: it.name, targetId: plan.target && plan.target.id };
+          save();
+        };
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, isStopped: () => modStop });
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
@@ -4737,6 +4803,14 @@
     return {
       log,
       onCaptured,
+      syncWatchList(items) {
+        const n = recordWonBids(ledger(), items);
+        if (n) {
+          save();
+          log(n + ' carta(s) ganha(s) em leilão registrada(s) no lucro.', 'success');
+          if (tab === 'profit' && !panel.hidden) renderProfit();
+        }
+      },
       syncFromTransferList(items, pile) {
         applySync(items, true, pile);
         if (!panel.hidden && tab === 'targets' && !el('targets').contains(doc.activeElement)) renderTargets();
@@ -5035,6 +5109,7 @@
       const items = itemsFromPileJson(json, lookup || {});
       piles[which] = { at: Date.now(), items };
       if (ui && (which === 'transfer' || which === 'unassigned')) ui.syncFromTransferList(items, which);
+      if (ui && which === 'watch') ui.syncWatchList(items);
     });
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
@@ -5113,7 +5188,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

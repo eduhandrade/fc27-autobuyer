@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.8.4
+// @version      1.8.5
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.8.4';
+  const SCRIPT_VERSION = '1.8.5';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2995,6 +2995,46 @@
         return false;
       },
 
+      // Diagnóstico em texto (para copiar e mandar): funções do Web App ligadas
+      // a SBC e time, com o começo do código de cada uma (mostra os parâmetros).
+      sbcDiagnosticText(found) {
+        const lines = ['FC27 Autobuyer ' + SCRIPT_VERSION + ' · diagnóstico SBC · ' + new Date().toISOString()];
+        const src = (fn) => { try { return String(fn).replace(/\s+/g, ' ').slice(0, 260); } catch (e) { return '?'; } };
+        const dump = (label, obj, re) => {
+          if (!obj) { lines.push(label + ': (não existe)'); return; }
+          const names = methodNames(obj);
+          lines.push(label + ' métodos: ' + names.join(', '));
+          names.filter((n) => re.test(n)).slice(0, 25).forEach((n) => {
+            let f;
+            try { f = obj[n]; } catch (e) { f = null; }
+            if (typeof f === 'function') lines.push('  ' + label + '.' + n + ' = ' + src(f));
+          });
+          let keys = [];
+          try { keys = Object.keys(obj); } catch (e) { keys = []; }
+          lines.push(label + ' campos: ' + keys.slice(0, 60).map((k) => {
+            let v;
+            try { v = obj[k]; } catch (e) { v = '?'; }
+            const t = v == null ? String(v) : Array.isArray(v) ? '[' + v.length + ']' : typeof v === 'object' ? ((v.constructor && v.constructor.name) || 'obj') : typeof v === 'function' ? 'fn' : JSON.stringify(v).slice(0, 40);
+            return k + '=' + t;
+          }).join(', '));
+        };
+        const svc = G('services') || {};
+        dump('services.SBC', svc.SBC, /oneclick|streamlin|score|item|squad|challenge|submit|save|load/i);
+        dump('services.Squad', svc.Squad, /active|squad/i);
+        if (found && !found.error) {
+          lines.push('achado em: ' + found.key);
+          dump('desafio', found.challenge, /item|score|add|set|submit|squad|oneclick|requirement/i);
+          if (found.squad) dump('elenco', found.squad, /item|player|slot|add|set|remove|score/i);
+          dump('tela', found.controller, /item|add|select|auto|submit|save|work|score|club|storage|oneclick/i);
+          const vm = found.controller && (found.controller._viewmodel || found.controller.viewmodel);
+          if (vm) dump('tela.viewmodel', vm, /item|add|select|auto|submit|work|score/i);
+        } else if (found && found.diag) {
+          lines.push('não achei o desafio. telas: ' + found.diag.classes.join(', '));
+          lines.push('campos: ' + found.diag.keys.join(', '));
+        }
+        return lines.join('\n');
+      },
+
       // O que o desafio aberto tem por dentro (para ajustar a montagem).
       sbcDescribe(found) {
         const out = [];
@@ -3618,6 +3658,8 @@
           <div class="result" data-el="ptsStatus" hidden></div>
           <button class="full price" data-act="ptsAssemble">🧩 Montar entrega no SBC</button>
           <div class="bidlog" data-el="ptsLog" hidden></div>
+          <button class="full" data-act="ptsDiag">📋 Copiar diagnóstico do SBC (para mandar no chat)</button>
+          <textarea data-el="ptsDiagText" rows="4" readonly hidden></textarea>
         </div>
         <div class="card">
           <div class="card-h">🧩 SBC pela solução do FUTBIN</div>
@@ -5595,6 +5637,17 @@
         if (a === 'sbcBuy') sbcStartBuying();
         if (a === 'ptsAddLine') { ptsState().lines.push({ qty: 0, rating: 0, max: 0 }); save(); renderPts(); }
         if (a === 'ptsRead') ptsRead();
+        if (a === 'ptsDiag') {
+          const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'indisponível' };
+          const text = adapter.sbcDiagnosticText ? adapter.sbcDiagnosticText(found) : 'indisponível';
+          const box = el('ptsDiagText');
+          box.hidden = false;
+          box.value = text;
+          const done = () => win.alert('Diagnóstico copiado (' + text.length + ' letras). Cole aqui no chat.');
+          try {
+            win.navigator.clipboard.writeText(text).then(done, () => { box.focus(); box.select(); win.alert('Não consegui copiar sozinho: toque e segure no texto abaixo do botão → Selecionar tudo → Copiar.'); });
+          } catch (e) { box.focus(); box.select(); }
+        }
         if (a === 'ptsMemSquad') {
           const roots = (deps.entities && deps.entities.roots) || new Map();
           const ids = [];

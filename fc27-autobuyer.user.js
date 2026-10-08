@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.1
+// @version      1.10.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.1';
+  const SCRIPT_VERSION = '1.10.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -3737,6 +3737,7 @@
           <div class="result" data-el="ptsStatus" hidden></div>
           <button class="full price" data-act="ptsAssemble">🧩 Montar entrega no SBC</button>
           <div class="bidlog" data-el="ptsLog" hidden></div>
+          <button class="full no" data-act="ptsClear">🧹 Limpar este SBC (começar outro)</button>
           <button class="full" data-act="ptsDiag">📋 Copiar diagnóstico do SBC (para mandar no chat)</button>
           <textarea data-el="ptsDiagText" rows="4" readonly hidden></textarea>
         </div>
@@ -3762,6 +3763,7 @@
             <p class="hint">Montar elenco: abra o desafio no Web App (a tela do elenco do SBC) e toque aqui. O bot coloca as cartas compradas e as que você já tem nas vagas e salva. Confira e envie você mesmo.</p>
             <div class="bidlog" data-el="sbcLog" hidden></div>
           </div>
+          <button class="full no" data-act="sbcClearSol" data-el="sbcClearSol" hidden>🧹 Limpar solução importada</button>
           <button class="full" data-act="sbcLegacy" data-el="sbcLegacy" hidden>Tirar do Sniper os alvos de SBC antigos</button>
           <button class="full" data-act="sbcResume" data-el="sbcResume" hidden>Reativar meus alvos pausados</button>
         </div>
@@ -4725,6 +4727,7 @@
       el('sbcActions').hidden = !s;
       el('sbcResume').hidden = !app.state.targets.some((t) => t.pausedForSbc);
       el('sbcLegacy').hidden = !app.state.targets.some((t) => t.sbc);
+      el('sbcClearSol').hidden = !app.state.sbc;
       if (!s) {
         el('sbcList').innerHTML = '<p class="hint">Nenhuma solução importada ainda.</p>';
         return;
@@ -5818,6 +5821,33 @@
         if (a === 'sbcBuy') sbcStartBuying();
         if (a === 'ptsAddLine') { ptsState().lines.push({ qty: 0, rating: 0, max: 0 }); save(); renderPts(); }
         if (a === 'ptsRead') ptsRead();
+        if (a === 'ptsClear') {
+          if (sbcEngine.running) return win.alert('Pare as compras antes de limpar.');
+          const st = app.state.pts;
+          const bought = st ? Object.values(st.bought || {}).reduce((n, l) => n + l.length, 0) : 0;
+          if (!win.confirm('Limpar o SBC por pontos? Apaga a meta, a solução, a lista do clube, as cartas candidatas e o registro de compras deste SBC.' +
+            (bought ? '\n\n' + bought + ' carta(s) compradas continuam na sua conta (Não atribuídos/clube); só saem desta lista.' : '') +
+            '\n\nAs cartas protegidas e o time memorizado continuam.')) return;
+          app.state.pts = null;
+          ptsRaw = new Map();
+          ptsLines = [];
+          el('ptsLog').hidden = true;
+          el('ptsLog').innerHTML = '';
+          el('ptsDiagText').hidden = true;
+          save();
+          renderPts();
+          log('SBC por pontos limpo.', 'success');
+        }
+        if (a === 'sbcClearSol') {
+          if (sbcEngine.running) return win.alert('Pare as compras antes de limpar.');
+          if (!win.confirm('Limpar a solução importada do FUTBIN (lista de jogadores e compras deste SBC)? As cartas compradas continuam na sua conta.')) return;
+          app.state.sbc = null;
+          sbcTraceLines = [];
+          el('sbcLog').hidden = true;
+          save();
+          renderSbc();
+          renderSbcStatus();
+        }
         if (a === 'ptsPasteList') ptsPasteList();
         if (a === 'ptsSuggest') ptsSuggest();
         if (a === 'ptsCandPrices') ptsCandPrices(act);

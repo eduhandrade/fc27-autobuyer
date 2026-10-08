@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.8.5
+// @version      1.9.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.8.5';
+  const SCRIPT_VERSION = '1.9.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2678,7 +2678,7 @@
 
     // Pontos (Item Score) informados pelo próprio Web App, se houver.
     function itemScoreOf(raw) {
-      for (const k of ['itemScore', 'sbcScore', 'galleryScore', 'score', 'getItemScore', 'getScore']) {
+      for (const k of ['sbsScore', 'itemScore', 'sbcScore', 'galleryScore', 'getItemScore']) {
         const v = numberOf(raw, k);
         if (typeof v === 'number' && v > 0) return v;
       }
@@ -2917,6 +2917,36 @@
         const ids = new Set();
         const tried = [];
         const shapes = [];
+        // FC 27: repositories.Squad.getSquads(persona) tem os elencos; o ativo
+        // é o de id services.Squad.activeSquad (ou isActive()).
+        const slotIds = (sq) => {
+          let slots = [];
+          for (const fn of ['getSlots', 'getPlayers']) {
+            try { if (typeof sq[fn] === 'function') { slots = sq[fn]() || []; if (slots.length) break; } } catch (e) { /* ignora */ }
+          }
+          slots.forEach((sl) => { const it = sl && (sl.item || sl._item); const id = it && numberOf(it, 'id'); if (id > 0) ids.add(id); });
+        };
+        try {
+          const user = G('services').User.getUser();
+          const persona = user && user.selectedPersona;
+          const repo = G('repositories') && G('repositories').Squad;
+          const sqSvc = G('services').Squad;
+          const activeId = sqSvc ? sqSvc.activeSquad : null;
+          tried.push('repositories.Squad.getSquads (time ' + activeId + ')');
+          let active = null;
+          if (repo && typeof repo.getSquads === 'function' && persona != null) {
+            const list = repo.getSquads(persona) || [];
+            active = list.find((sq) => { try { return typeof sq.isActive === 'function' ? sq.isActive() : false; } catch (e) { return false; } }) ||
+              list.find((sq) => { try { return sq.getId() === activeId; } catch (e) { return false; } }) || null;
+          }
+          if (!active && sqSvc && typeof sqSvc.requestSquadById === 'function' && activeId != null) {
+            tried.push('services.Squad.requestSquadById(' + activeId + ')');
+            const res = await observe(sqSvc.requestSquadById(activeId, persona), 15000);
+            active = res && res.data && (res.data.squad || res.data);
+          }
+          if (active) slotIds(active);
+          if (ids.size >= 11) return { success: true, ids, method: 'time ativo do Web App' };
+        } catch (e) { tried.push('erro ' + e.message); }
         const addItem = (it) => {
           if (!it || typeof it !== 'object') return;
           const id = numberOf(it, 'id') || (it.itemData && it.itemData.id);
@@ -2927,7 +2957,7 @@
           if (!x || typeof x !== 'object' || depth > 4 || seen.has(x) || x.nodeType) return;
           seen.add(x);
           (findItemArray(x) || []).forEach(addItem);
-          for (const fn of ['getPlayers', 'getFieldPlayers', 'getSubstitutes', 'getReserves', 'getItems']) {
+          for (const fn of ['getSlots', 'getPlayers', 'getFieldPlayers', 'getSubstitutes', 'getReserves', 'getItems']) {
             try {
               if (typeof x[fn] === 'function') (x[fn]() || []).forEach((sl) => addItem(sl && (sl.item || sl._item || (typeof sl.getItem === 'function' ? sl.getItem() : sl))));
             } catch (e) { /* ignora */ }
@@ -3033,6 +3063,39 @@
           lines.push('campos: ' + found.diag.keys.join(', '));
         }
         return lines.join('\n');
+      },
+
+      // SBC por pontos (One Click): marca as cartas na Work Area, como se você
+      // tocasse em cada uma. Não envia.
+      sbcOneClickSelect(found, raws) {
+        const vm = found.controller;
+        if (!vm || typeof vm.selectItem !== 'function' || !vm._selectedItemIds) return { success: false, status: 'a tela não tem seleção de cartas' };
+        const tab = vm._activeTab || 'club';
+        let selected = 0;
+        const skipped = [];
+        for (const given of raws) {
+          const id = numberOf(given, 'id');
+          if (!(id > 0)) continue;
+          // Se a tela já carregou essa carta, usa o objeto dela (tem os pontos).
+          const raw = (vm._itemEntityMap && vm._itemEntityMap.get(id)) || given;
+          const score = numberOf(raw, 'sbsScore') || 0;
+          try {
+            if (vm._itemEntityMap && !vm._itemEntityMap.has(id)) vm._itemEntityMap.set(id, raw);
+            if (vm._itemScoreMap && !vm._itemScoreMap.has(id)) vm._itemScoreMap.set(id, score);
+            if (vm._itemTabMap && !vm._itemTabMap.has(id)) vm._itemTabMap.set(id, tab);
+            if (typeof vm.isItemSelectable === 'function' && !vm.isItemSelectable(raw)) { skipped.push(id + ' sem pontos'); continue; }
+            if (vm.selectItem(raw)) selected++;
+            else skipped.push(id + ' limite de seleção');
+          } catch (e) { skipped.push(id + ' erro ' + e.message); }
+        }
+        let score = 0;
+        try { score = vm.getSelectedScore(); } catch (e) { score = 0; }
+        // Pede para a tela se redesenhar.
+        for (const fn of ['_emitCurrentPage', 'restoreToLastSelectedPage']) {
+          try { if (typeof vm[fn] === 'function') { vm[fn](() => {}); break; } } catch (e) { /* ignora */ }
+        }
+        return { success: selected > 0, selected, score, skipped, limit: typeof vm.getSelectionLimit === 'function' ? vm.getSelectionLimit() : 30,
+          needed: found.challenge ? (found.challenge.scoreRequirement || 0) - (found.challenge.submittedScore || 0) : 0 };
       },
 
       // O que o desafio aberto tem por dentro (para ajustar a montagem).
@@ -5029,8 +5092,12 @@
       btn.disabled = true;
       try {
         adapter.sbcDescribe(found).forEach((line) => ptsTrace('  ' + line, 'muted'));
-        if (!found.squad) {
-          ptsTrace('❌ Achei o SBC, mas ele não usa vagas de elenco. Ainda não sei colocar cartas nessa tela: me mande um print deste log para eu ajustar.', 'error');
+        // A seleção fica no "view model" da Work Area (às vezes dentro da tela).
+        const ctl = found.controller;
+        const workVm = [ctl, ctl && (ctl._viewmodel || ctl.viewmodel || ctl._viewModel)].find((x) => x && typeof x.selectItem === 'function');
+        const oneClick = !found.squad && !!workVm;
+        if (!found.squad && !oneClick) {
+          ptsTrace('❌ Achei o SBC, mas não sei colocar cartas nessa tela. Toque em "Copiar diagnóstico" e me mande.', 'error');
           return;
         }
         const raws = [];
@@ -5058,6 +5125,19 @@
         }
         if (!raws.length) { win.alert('Nenhuma carta para colocar. Procure no clube e/ou compre antes.'); return; }
         const pts = raws.reduce((n, x) => n + ptsScore(x.rating), 0);
+        if (oneClick) {
+          const r = adapter.sbcOneClickSelect(Object.assign({}, found, { controller: workVm }), raws.map((x) => x.raw));
+          if (r.success) {
+            ptsTrace('✅ ' + r.selected + ' carta(s) selecionada(s) na Work Area · pontos pelo jogo: ' + fmt(r.score) +
+              (r.needed > 0 ? ' de ' + fmt(r.needed) + (r.score >= r.needed ? ' ✅' : ' ❌ faltam ' + fmt(r.needed - r.score)) : '') +
+              '. Confira na tela e toque no botão de enviar do jogo. Se a tela não mostrar as cartas marcadas, troque de aba (Club/SBC Storage) e volte.', 'success');
+            if (r.skipped.length) ptsTrace('Não selecionadas: ' + r.skipped.join(', ') + (raws.length > r.limit ? '. O jogo aceita ' + r.limit + ' por vez: envie e toque em Montar de novo.' : ''), 'warn');
+            log('SBC por pontos: ' + r.selected + ' carta(s) selecionada(s), ' + fmt(r.score) + ' pontos.', 'success');
+          } else {
+            ptsTrace('❌ Não consegui selecionar: ' + (r.status || r.skipped.join(', ')) + '. Toque em "Copiar diagnóstico" e me mande.', 'error');
+          }
+          return;
+        }
         const slots = adapter.sbcSlots(found.squad, 200);
         const free = slots.filter((x) => !x.item);
         const usable = free.length ? free : slots;

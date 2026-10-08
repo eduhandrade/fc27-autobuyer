@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.7.1
+// @version      1.7.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.7.1';
+  const SCRIPT_VERSION = '1.7.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2053,7 +2053,7 @@
     handleFailure(status, what) {
       const kind = classifyStatus(status);
       if (FATAL_MESSAGES[kind]) {
-        this.log(FATAL_MESSAGES[kind], 'error');
+        this.log(FATAL_MESSAGES[kind] + ' (código ' + status + ' na ' + what + ')', 'error');
         return this.stop(STOP_REASONS[kind]);
       }
       this.stats.errors++;
@@ -2268,9 +2268,9 @@
       res.searches++;
       if (!search.success) {
         const kind = classifyStatus(search.status);
-        res.stopReason = FATAL_MESSAGES[kind] ? STOP_REASONS[kind] : 'erro ' + search.status + ' na busca';
-        log(FATAL_MESSAGES[kind] || ('Erro ' + search.status + ' na busca de lances.'), 'error');
-        trace('Busca ' + res.searches + ': erro ' + search.status + '.', 'error');
+        res.stopReason = FATAL_MESSAGES[kind] ? STOP_REASONS[kind] + ' (código ' + search.status + ' na busca)' : 'erro ' + search.status + ' na busca';
+        log((FATAL_MESSAGES[kind] || 'Erro na busca de lances.') + ' (código ' + search.status + ')', 'error');
+        trace('Busca ' + res.searches + ': a EA recusou a busca (código ' + search.status + '). ' + (FATAL_MESSAGES[kind] || ''), 'error');
         break;
       }
       const left = plan.maxBids > 0 ? plan.maxBids - res.bids - res.simulated : 0;
@@ -2284,6 +2284,7 @@
         .map(([why, n]) => n + ' ' + why).join(', ');
       trace('Busca ' + res.searches + ' de ' + maxRounds + ': ' + search.items.length + ' leilão(ões) achados, ' +
         picks.length + ' escolhido(s)' + (skipText ? ' · ignorados: ' + skipText : '') + '.', picks.length ? 'info' : 'muted');
+      if (picks.length) await wait(randomBetween(900, 1800, random));
       for (const pick of picks) {
         if (stopped()) break;
         seen.add(pick.item.tradeId);
@@ -2307,8 +2308,10 @@
         } else {
           const kind = classifyStatus(bid.status);
           if (FATAL_MESSAGES[kind]) {
-            res.stopReason = STOP_REASONS[kind];
-            log(FATAL_MESSAGES[kind], 'error');
+            res.stopReason = STOP_REASONS[kind] + ' (código ' + bid.status + ' no lance)';
+            log(FATAL_MESSAGES[kind] + ' (código ' + bid.status + ' no lance)', 'error');
+            trace('   ❌ a EA recusou o lance (código ' + bid.status + '). ' + FATAL_MESSAGES[kind], 'error');
+            trace('Fim: ' + res.stopReason + '.', 'warn');
             return res;
           }
           res.missed++;

@@ -50,7 +50,7 @@ test('lances em massa: para no captcha e conta lances perdidos', async () => {
   const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 5 }, settings: S, log: () => {}, wait: noWait });
   assert.equal(r.missed, 1);
   assert.equal(r.bids, 0);
-  assert.equal(r.stopReason, 'captcha da EA');
+  assert.match(r.stopReason, /^captcha da EA \(código 458 no lance\)$/);
   assert.equal(ad.calls.bids.length, 2);
 });
 

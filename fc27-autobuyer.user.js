@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.8.3
+// @version      1.8.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.8.3';
+  const SCRIPT_VERSION = '1.8.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1297,6 +1297,7 @@
       if (registry && item && item.id > 0) {
         registry.set(item.id, item);
         if (registry.screens) registry.screens.set(item.id, screenTitle());
+        if (registry.roots) { try { registry.roots.set(item.id, rootFromView(view)); } catch (e) { /* ignora */ } }
       }
       const settings = getSettings();
       if (!settings.showCardPrices) return;
@@ -2965,12 +2966,13 @@
               const res = await call(svc, fn);
               if (typeof res === 'number') activeId = res;
               else if (res && typeof res.data === 'number') activeId = res.data;
+              else if (res && res.data && typeof res.data === 'object' && typeof (res.data.squadId || res.data.id) === 'number') activeId = res.data.squadId || res.data.id;
               else take(res, 0);
             } catch (e) { /* tenta a próxima */ }
           }
           // Só temos o número do time ativo: pede o time por esse número.
           if (ids.size < 11 && activeId != null) {
-            for (const fn of fns.filter((n) => /^(get|request|load|fetch)Squad(ById)?$|^(get|request|load)Squad/i.test(n) && !/active|ids?$|list|all/i.test(n)).slice(0, 4)) {
+            for (const fn of fns.filter((n) => /^(get|request|load|fetch)Squad/i.test(n) && !/active|Ids$|list|all|count|chem|rating|name/i.test(n)).slice(0, 4)) {
               tried.push(root + '.' + name + '.' + fn + '(' + activeId + ')');
               try { take(await call(svc, fn, activeId), 0); } catch (e) { /* tenta a próxima */ }
               if (ids.size >= 11) break;
@@ -3274,6 +3276,7 @@
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
           bids: pruneBids(saved.bids),
           pts: saved.pts && Array.isArray(saved.pts.lines) ? saved.pts : null,
+          squadIds: Array.isArray(saved.squadIds) ? saved.squadIds : [],
           ptsProtected: Array.isArray(saved.ptsProtected) ? saved.ptsProtected : [],
           bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
         };
@@ -3603,6 +3606,8 @@
           <button class="full" data-act="ptsAddLine">+ Adicionar nota</button>
           <div class="result" data-el="ptsCheck"></div>
           <button class="full" data-act="ptsRead">📖 Ler o SBC aberto no Web App</button>
+          <button class="full" data-act="ptsMemSquad">📋 Memorizar meu time</button>
+          <p class="hint">Para o bot nunca usar cartas do seu time: abra <b>Squads</b> no Web App, abra também <b>Subs</b> e <b>Res</b> (reservas), e com essa tela aberta toque em "Memorizar meu time". Faça de novo quando mudar o time.</p>
           <button class="full" data-act="ptsClub">🏠 Procurar no meu clube</button>
           <div data-el="ptsPlan"></div>
           <p class="hint">Carta desmarcada fica protegida: não entra nas próximas buscas. <button type="button" data-act="ptsUnprotect">Desproteger todas</button></p>
@@ -4891,12 +4896,14 @@
         ptsTrace('Li ' + (club.items || []).length + ' jogador(es) ouro do clube' + (un && un.ok ? ' + ' + un.items.length + ' em Não atribuídos' : '') +
           (club.success ? '.' : ' (não consegui ler o clube: ' + (club.missing ? 'função não encontrada' : club.status) + ').'), club.success ? 'info' : 'warn');
         const squad = await adapter.activeSquadIds();
+        (app.state.squadIds || []).forEach((id) => squad.ids.add(id));
+        if (!squad.success && (app.state.squadIds || []).length) { squad.success = true; }
         const exclude = new Set(squad.ids);
         items.forEach((it) => { if (it.raw && adapter.inActiveSquad && adapter.inActiveSquad(it.raw)) exclude.add(it.id); });
         const protectedIds = new Set(app.state.ptsProtected || []);
         protectedIds.forEach((id) => exclude.add(id));
-        if (squad.success) ptsTrace('Time ativo: ' + squad.ids.size + ' carta(s) fora da lista.', 'info');
-        else ptsTrace('Não consegui ler o seu time (' + squad.why + '). Abra a tela "Squads" do Web App uma vez e procure de novo; ou desmarque as cartas do time (elas ficam protegidas nas próximas buscas).', 'warn');
+        if (squad.success) ptsTrace('Seu time: ' + squad.ids.size + ' carta(s) fora da lista' + ((app.state.squadIds || []).length ? ' (time memorizado)' : '') + '.', 'info');
+        else ptsTrace('Não consegui ler o seu time (' + squad.why + '). Use "📋 Memorizar meu time" com a tela Squads aberta.', 'warn');
         if (protectedIds.size) ptsTrace(protectedIds.size + ' carta(s) que você desmarcou antes ficaram de fora.', 'muted');
         const specials = items.filter((it) => lines.some((l) => l.rating === it.rating) && it.special === true).length;
         if (specials) ptsTrace(specials + ' carta(s) especial(is) dessas notas ficaram de fora.', 'muted');
@@ -5588,6 +5595,26 @@
         if (a === 'sbcBuy') sbcStartBuying();
         if (a === 'ptsAddLine') { ptsState().lines.push({ qty: 0, rating: 0, max: 0 }); save(); renderPts(); }
         if (a === 'ptsRead') ptsRead();
+        if (a === 'ptsMemSquad') {
+          const roots = (deps.entities && deps.entities.roots) || new Map();
+          const ids = [];
+          const names = [];
+          roots.forEach((root, id) => {
+            const it = deps.entities.get(id);
+            if (!root || !root.isConnected || !it) return;
+            const item = adapter.toItem(it);
+            if (item.kind !== 'player') return;
+            ids.push(id);
+            names.push(item.name + ' ' + (item.rating || ''));
+          });
+          if (!ids.length) {
+            win.alert('Não vi cartas na tela. Abra a tela Squads do Web App (com Subs e Res abertos), feche este painel com ✕, e abra de novo para tocar aqui.');
+          } else if (win.confirm('Memorizar ' + ids.length + ' carta(s) como seu time?\n\n' + names.slice(0, 30).join(', ') + (names.length > 30 ? '…' : ''))) {
+            app.state.squadIds = ids;
+            save();
+            ptsTrace('Time memorizado: ' + ids.length + ' carta(s) (' + names.slice(0, 12).join(', ') + (names.length > 12 ? '…' : '') + ').', 'success');
+          }
+        }
         if (a === 'ptsUnprotect') {
           const n = (app.state.ptsProtected || []).length;
           if (n && win.confirm('Desproteger ' + n + ' carta(s)? Elas voltam a poder entrar no SBC.')) { app.state.ptsProtected = []; save(); }
@@ -6173,6 +6200,7 @@
     // pilhas que ele já carregou (lista de transferências etc.).
     const entities = new Map();
     entities.screens = new Map();
+    entities.roots = new Map();
     const market = createMarketCache();
     const piles = {};
     let ui = null;

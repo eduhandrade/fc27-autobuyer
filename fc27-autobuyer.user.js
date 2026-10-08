@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.8.1
+// @version      1.8.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.8.1';
+  const SCRIPT_VERSION = '1.8.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2908,27 +2908,56 @@
 
       // IDs das cartas do time ativo (para não usar no SBC).
       async activeSquadIds() {
-        const svc = G('services') && G('services').Squad;
         const ids = new Set();
-        if (!svc) return { success: false, ids, why: 'services.Squad não encontrado' };
-        const names = methodNames(svc).filter((n) => /active/i.test(n) && /^(get|request|load|fetch)/i.test(n));
-        for (const fn of names) {
-          try {
-            const obs = svc[fn]();
-            const response = obs && typeof obs.observe === 'function' ? await observe(obs, 15000) : obs;
-            const grab = (x) => {
-              const arr = findItemArray(x) || [];
-              arr.forEach((it) => { const id = numberOf(it, 'id') || (it.itemData && it.itemData.id); if (id > 0) ids.add(id); });
-            };
-            grab(response);
-            const sq = response && response.data && (response.data.squad || response.data);
-            if (sq && typeof sq.getPlayers === 'function') {
-              sq.getPlayers().forEach((sl) => { const it = sl && (sl.item || sl._item || sl); const id = it && numberOf(it, 'id'); if (id > 0) ids.add(id); });
-            }
-            if (ids.size) return { success: true, ids, method: fn };
-          } catch (e) { /* tenta a próxima */ }
+        const tried = [];
+        const take = (x, depth) => {
+          if (!x || typeof x !== 'object' || depth > 3) return;
+          const arr = findItemArray(x) || [];
+          arr.forEach((it) => { const id = numberOf(it, 'id') || (it.itemData && it.itemData.id); if (id > 0) ids.add(id); });
+          for (const fn of ['getPlayers', 'getFieldPlayers', 'getSubstitutes', 'getReserves']) {
+            try {
+              if (typeof x[fn] === 'function') {
+                (x[fn]() || []).forEach((sl) => {
+                  const it = sl && (sl.item || sl._item || (typeof sl.getItem === 'function' ? sl.getItem() : sl));
+                  const id = it && numberOf(it, 'id');
+                  if (id > 0) ids.add(id);
+                });
+              }
+            } catch (e) { /* ignora */ }
+          }
+          for (const k of ['squad', '_squad', 'activeSquad', '_activeSquad', 'data']) if (x[k] && x[k] !== x) take(x[k], depth + 1);
+        };
+        const sources = [['services', 'Squad'], ['services', 'Squads'], ['repositories', 'Squad'], ['repositories', 'Squads']];
+        for (const [root, name] of sources) {
+          const svc = G(root) && G(root)[name];
+          if (!svc) continue;
+          // Propriedades já carregadas (time ativo em memória).
+          for (const k of Object.keys(svc)) {
+            if (/active/i.test(k)) { tried.push(root + '.' + name + '.' + k); take(svc[k], 0); }
+          }
+          for (const fn of methodNames(svc).filter((n) => /active/i.test(n) && /^(get|request|load|fetch)/i.test(n))) {
+            tried.push(root + '.' + name + '.' + fn + '()');
+            try {
+              let res = svc[fn]();
+              if (res && typeof res.observe === 'function') res = await observe(res, 15000);
+              take(res, 0);
+            } catch (e) { /* tenta a próxima */ }
+          }
+          if (ids.size >= 11) return { success: true, ids, method: tried[tried.length - 1] };
         }
-        return { success: false, ids, why: names.length ? 'funções ' + names.join(', ') + ' não trouxeram o time' : 'nenhuma função de time ativo' };
+        return { success: ids.size > 0, ids, why: tried.length ? 'tentei ' + tried.slice(0, 6).join(', ') : 'não achei o serviço de elencos', tried };
+      },
+
+      // Marcas na própria carta de que ela está no time ativo.
+      inActiveSquad(raw) {
+        for (const k of ['isInActiveSquad', 'inActiveSquad', 'isInSquad', 'inSquad', 'isActiveSquadMember']) {
+          try {
+            const v = raw[k];
+            const val = typeof v === 'function' ? v.call(raw) : v;
+            if (val === true) return true;
+          } catch (e) { /* ignora */ }
+        }
+        return false;
       },
 
       // O que o desafio aberto tem por dentro (para ajustar a montagem).
@@ -2942,10 +2971,15 @@
             if (typeof v === 'number' && /score|point|target|progress|goal|value|req/i.test(k)) out.push(prefix + k + '=' + v);
           }
         };
+        if (found.key) out.push('achado em: ' + found.key);
         nums(found.challenge, 'desafio.');
-        nums(found.squad, 'elenco.');
+        if (found.squad) nums(found.squad, 'elenco.');
+        out.push('campos do desafio: ' + Object.keys(found.challenge || {}).slice(0, 30).join(', '));
         out.push('métodos do desafio: ' + methodNames(found.challenge).slice(0, 25).join(', '));
-        out.push('métodos do elenco: ' + methodNames(found.squad).filter((n) => /item|player|slot|add|set|remove|score/i.test(n)).slice(0, 25).join(', '));
+        if (found.squad) out.push('métodos do elenco: ' + methodNames(found.squad).filter((n) => /item|player|slot|add|set|remove|score/i.test(n)).slice(0, 25).join(', '));
+        else out.push('o desafio não tem "squad" (SBC por pontos usa outra estrutura)');
+        const ctl = found.controller;
+        if (ctl) out.push('métodos da tela: ' + methodNames(ctl).filter((n) => /item|add|select|auto|submit|save|work|score|club|storage/i.test(n)).slice(0, 30).join(', '));
         const sbc = G('services') && G('services').SBC;
         if (sbc) out.push('services.SBC: ' + methodNames(sbc).slice(0, 25).join(', '));
         return out;
@@ -2960,32 +2994,52 @@
 
       // Desafio de SBC aberto agora no Web App (tela do elenco do desafio).
       sbcChallenge() {
+        const diag = { classes: [], keys: [] };
         try {
           const main = G('getAppMain');
-          if (typeof main !== 'function') return { error: 'Web App não encontrado' };
+          if (typeof main !== 'function') return { error: 'Web App não encontrado', diag };
           const queue = [main().getRootViewController()];
           const seen = new Set();
-          while (queue.length && seen.size < 80) {
+          const isCtl = (v) => v && typeof v === 'object' && !v.nodeType && !Array.isArray(v) &&
+            /Controller|ViewModel|Presenter|Navigation/i.test((v.constructor && v.constructor.name) || '');
+          const looksChallenge = (v) => v && typeof v === 'object' && !v.nodeType &&
+            ['squad', 'eligibilityRequirements', 'requirements', 'id', 'challengeId'].some((k) => { try { return v[k] != null; } catch (e) { return false; } });
+          while (queue.length && seen.size < 400) {
             const c = queue.shift();
             if (!c || typeof c !== 'object' || seen.has(c)) continue;
             seen.add(c);
-            for (const k of ['_challenge', 'challenge', '_sbcChallenge', '_currentChallenge']) {
-              const ch = c[k];
-              if (ch && typeof ch === 'object' && ch.squad && typeof ch.squad === 'object') return { challenge: ch, squad: ch.squad, controller: c };
+            const cls = (c.constructor && c.constructor.name) || '?';
+            if (diag.classes.length < 40 && !diag.classes.includes(cls)) diag.classes.push(cls);
+            let keys = [];
+            try { keys = Object.keys(c); } catch (e) { keys = []; }
+            for (const k of keys) {
+              let v;
+              try { v = c[k]; } catch (e) { continue; }
+              if (/challenge|sbc|workarea|work_area|submission/i.test(k) && diag.keys.length < 40) diag.keys.push(cls + '.' + k);
+              if (/challenge/i.test(k) && looksChallenge(v)) {
+                return { challenge: v, squad: v.squad && typeof v.squad === 'object' ? v.squad : null, controller: c, key: cls + '.' + k, diag };
+              }
+              if (isCtl(v)) queue.push(v);
+              else if (Array.isArray(v) && v.length && v.length < 30 && v.some(isCtl)) v.forEach((x) => { if (isCtl(x)) queue.push(x); });
             }
-            const vm = c._viewmodel || c.viewmodel;
-            if (vm && vm.challenge && vm.challenge.squad) return { challenge: vm.challenge, squad: vm.challenge.squad, controller: c };
-            for (const fn of ['getPresentedViewController', 'getCurrentViewController', 'getCurrentController']) {
+            const vm = c._viewmodel || c.viewmodel || c._viewModel;
+            if (vm && typeof vm === 'object') {
+              for (const k of Object.keys(vm)) {
+                if (/challenge/i.test(k) && looksChallenge(vm[k])) return { challenge: vm[k], squad: vm[k].squad || null, controller: c, key: cls + '.viewmodel.' + k, diag };
+              }
+              queue.push(vm);
+            }
+            for (const fn of ['getPresentedViewController', 'getCurrentViewController', 'getCurrentController', 'getRootViewController']) {
               try { if (typeof c[fn] === 'function') queue.push(c[fn]()); } catch (e) { /* ignora */ }
             }
-            for (const k of ['childViewControllers', '_childViewControllers', 'currentController', '_currentController', '_squadController', '_challengeController']) {
+            for (const k of ['childViewControllers', '_childViewControllers', 'currentController', '_currentController']) {
               const v = c[k];
               if (Array.isArray(v)) v.forEach((x) => queue.push(x));
               else if (v && typeof v === 'object') queue.push(v);
             }
           }
-        } catch (e) { return { error: 'erro ' + e.message }; }
-        return { error: 'abra o desafio (a tela do elenco do SBC) no Web App' };
+        } catch (e) { return { error: 'erro ' + e.message, diag }; }
+        return { error: 'abra o desafio (a tela do SBC) no Web App', diag };
       },
 
       // Vagas do elenco do desafio: [{ index, position, item }].
@@ -3187,6 +3241,7 @@
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
           bids: pruneBids(saved.bids),
           pts: saved.pts && Array.isArray(saved.pts.lines) ? saved.pts : null,
+          ptsProtected: Array.isArray(saved.ptsProtected) ? saved.ptsProtected : [],
           bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
         };
       },
@@ -3517,6 +3572,7 @@
           <button class="full" data-act="ptsRead">📖 Ler o SBC aberto no Web App</button>
           <button class="full" data-act="ptsClub">🏠 Procurar no meu clube</button>
           <div data-el="ptsPlan"></div>
+          <p class="hint">Carta desmarcada fica protegida: não entra nas próximas buscas. <button type="button" data-act="ptsUnprotect">Desproteger todas</button></p>
           <div class="ed-actions">
             <button class="go" data-act="ptsBuy">🛒 Comprar o que falta</button>
             <button class="no" data-act="sbcStop">Parar</button>
@@ -4738,16 +4794,32 @@
         const [r, id] = use.split(':').map(Number);
         const p = (st.picks || {})[r];
         const x = p && p.items.find((y) => y.id === id);
-        if (x) { x.use = e.target.checked; save(); renderPtsPlan(); }
+        if (x) {
+          x.use = e.target.checked;
+          // Desmarcada = protegida (não entra nas próximas buscas).
+          const prot = new Set(app.state.ptsProtected || []);
+          if (x.use) prot.delete(x.id); else prot.add(x.id);
+          app.state.ptsProtected = Array.from(prot);
+          save();
+          renderPtsPlan();
+        }
+      }
+    }
+
+    function logNotFound(found, trace) {
+      trace('❌ Não achei o SBC na tela: ' + found.error + '. Me mande um print destas linhas:', 'error');
+      if (found.diag) {
+        trace('  telas: ' + found.diag.classes.join(', '), 'muted');
+        trace('  campos: ' + (found.diag.keys.join(', ') || 'nenhum com "challenge"'), 'muted');
       }
     }
 
     async function ptsRead() {
       const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'função indisponível' };
-      if (found.error) return win.alert('Não achei o SBC: ' + found.error + '.');
+      if (found.error) { logNotFound(found, ptsTrace); return win.alert('Não achei o SBC aberto. Os detalhes estão no log da seção "SBC por pontos" — me mande um print.'); }
       ptsTrace('SBC encontrado. Detalhes (me mande um print se algo não funcionar):', 'info');
       adapter.sbcDescribe(found).forEach((line) => ptsTrace('  ' + line, 'muted'));
-      const slots = adapter.sbcSlots(found.squad, 200);
+      const slots = found.squad ? adapter.sbcSlots(found.squad, 200) : [];
       ptsTrace('Vagas encontradas: ' + slots.length + ' (ocupadas: ' + slots.filter((x) => x.item).length + ').', 'info');
       // Meta lida da tela, se o desafio informar (ex.: targetScore = 85000).
       const st = ptsState();
@@ -4776,13 +4848,18 @@
         ptsTrace('Li ' + (club.items || []).length + ' jogador(es) ouro do clube' + (un && un.ok ? ' + ' + un.items.length + ' em Não atribuídos' : '') +
           (club.success ? '.' : ' (não consegui ler o clube: ' + (club.missing ? 'função não encontrada' : club.status) + ').'), club.success ? 'info' : 'warn');
         const squad = await adapter.activeSquadIds();
-        if (squad.success) ptsTrace('Time ativo: ' + squad.ids.size + ' carta(s) protegida(s).', 'info');
-        else ptsTrace('Não consegui ler o seu time (' + squad.why + '). Confira a lista e desmarque as cartas do time.', 'warn');
+        const exclude = new Set(squad.ids);
+        items.forEach((it) => { if (it.raw && adapter.inActiveSquad && adapter.inActiveSquad(it.raw)) exclude.add(it.id); });
+        const protectedIds = new Set(app.state.ptsProtected || []);
+        protectedIds.forEach((id) => exclude.add(id));
+        if (squad.success) ptsTrace('Time ativo: ' + squad.ids.size + ' carta(s) fora da lista.', 'info');
+        else ptsTrace('Não consegui ler o seu time (' + squad.why + '). Abra a tela "Squads" do Web App uma vez e procure de novo; ou desmarque as cartas do time (elas ficam protegidas nas próximas buscas).', 'warn');
+        if (protectedIds.size) ptsTrace(protectedIds.size + ' carta(s) que você desmarcou antes ficaram de fora.', 'muted');
         const specials = items.filter((it) => lines.some((l) => l.rating === it.rating) && it.special === true).length;
         if (specials) ptsTrace(specials + ' carta(s) especial(is) dessas notas ficaram de fora.', 'muted');
         if (items.some((it) => it.special == null)) ptsTrace('Algumas cartas não informam a raridade: confira se nenhuma especial ficou marcada.', 'warn');
         ptsRaw = new Map(items.filter((it) => it.raw).map((it) => [it.id, it.raw]));
-        const plan = planPtsFromClub(lines, items, squad.ids);
+        const plan = planPtsFromClub(lines, items, exclude);
         st.picks = {};
         plan.picks.forEach((p) => {
           st.picks[p.rating] = { available: p.available, items: p.items.map((it) => ({ id: it.id, name: it.name, untradeable: !!it.untradeable, use: true })) };
@@ -4845,11 +4922,15 @@
       const st = ptsState();
       if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
       const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'função indisponível' };
-      if (found.error) return win.alert('Não achei o SBC: ' + found.error + '.');
+      if (found.error) { logNotFound(found, ptsTrace); return win.alert('Não achei o SBC aberto. Os detalhes estão no log da seção — me mande um print.'); }
       modBusy = 'SBC';
       btn.disabled = true;
       try {
         adapter.sbcDescribe(found).forEach((line) => ptsTrace('  ' + line, 'muted'));
+        if (!found.squad) {
+          ptsTrace('❌ Achei o SBC, mas ele não usa vagas de elenco. Ainda não sei colocar cartas nessa tela: me mande um print deste log para eu ajustar.', 'error');
+          return;
+        }
         const raws = [];
         // Do clube (escolhidas na lista).
         for (const [r, p] of Object.entries(st.picks || {})) {
@@ -4954,7 +5035,10 @@
       if (!s) return;
       if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
       const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'função indisponível' };
-      if (found.error) return win.alert('Não achei o desafio: ' + found.error + '.');
+      if (found.error || !found.squad) {
+        if (found.error) logNotFound(found, sbcTrace);
+        return win.alert('Não achei o elenco do desafio aberto' + (found.error ? '' : ' (esse SBC não usa vagas de elenco)') + '. Detalhes no log.');
+      }
       modBusy = 'SBC';
       btn.disabled = true;
       try {
@@ -5451,6 +5535,10 @@
         if (a === 'sbcBuy') sbcStartBuying();
         if (a === 'ptsAddLine') { ptsState().lines.push({ qty: 0, rating: 0, max: 0 }); save(); renderPts(); }
         if (a === 'ptsRead') ptsRead();
+        if (a === 'ptsUnprotect') {
+          const n = (app.state.ptsProtected || []).length;
+          if (n && win.confirm('Desproteger ' + n + ' carta(s)? Elas voltam a poder entrar no SBC.')) { app.state.ptsProtected = []; save(); }
+        }
         if (a === 'ptsClub') ptsScanClub(act);
         if (a === 'ptsBuy') ptsBuy();
         if (a === 'ptsAssemble') ptsAssemble(act);

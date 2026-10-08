@@ -199,3 +199,20 @@ test('lances: confere e anuncia só as ganhas da sessão', async () => {
   assert.equal(r2.simulated, 2);
   assert.equal(calls.length, calls2);
 });
+
+test('lances: carta ganha com Shadow ou Hunter não é anunciada', async () => {
+  const won = (id, playStyle) => ({ id, name: 'J' + id, rating: 80, playStyle, tradeState: 'closed', bidState: 'highest', currentBid: 1000, raw: { id } });
+  const calls = [];
+  const adapter = {
+    async pile() { return { success: true, items: [won(1, 268), won(2, 266), won(3, 250), won(4)] }; },
+    async moveToTransferList(raw) { calls.push(['move', raw.id]); return { success: true }; },
+    async list(raw) { calls.push(['list', raw.id]); return { success: true }; },
+  };
+  const r = await ab.collectWonBids({ adapter, ledger: {}, log: () => {}, settings: { dryRun: false }, wait: async () => {},
+    sell: { bin: 2000, skipChem: true } });
+  assert.deepEqual(calls.filter((c) => c[0] === 'list').map((c) => c[1]), [3, 4]);
+  assert.equal(r.moved, 4);
+  assert.equal(ab.keepForChemStyle({ playStyle: 268 }), true);
+  assert.equal(ab.keepForChemStyle({ playStyle: 250 }), false);
+  assert.equal(ab.keepForChemStyle({}), false);
+});

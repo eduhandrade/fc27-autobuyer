@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.2
+// @version      1.10.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.2';
+  const SCRIPT_VERSION = '1.10.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2419,7 +2419,10 @@
       counts[st]++;
       if (st !== 'ganhou') continue;
       recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId, price: it.currentBid, source: 'lance' });
-      const toSell = sell && (!sell.onlyIds || sell.onlyIds.has(ledgerKey(it.id)));
+      // Cartas com Shadow/Hunter aplicado não são anunciadas (ficam na lista).
+      const keepChem = sell && sell.skipChem && keepForChemStyle(it);
+      const toSell = sell && !keepChem && (!sell.onlyIds || sell.onlyIds.has(ledgerKey(it.id)));
+      if (keepChem) trace('⏸ ' + describeItem(it) + ': tem ' + chemStyleName(it.playStyle) + ', não anunciei (ficou na lista de transferências).', 'info');
       if (s.dryRun) {
         if (toSell) {
           counts.simulated++;
@@ -2463,6 +2466,14 @@
       }
     }
     return counts;
+  }
+
+  // Estilos de química que fazem a carta valer mais: não revender automático.
+  const KEEP_CHEM_IDS = [266, 268];
+  function keepForChemStyle(it) {
+    const id = it && it.playStyle;
+    if (!(id > 0)) return false;
+    return KEEP_CHEM_IDS.includes(id) || /shadow|hunter|sombra|ca[cç]ador/i.test(chemStyleName(id));
   }
 
   // Venda em massa: anuncia a quantidade escolhida de cada grupo.
@@ -3678,6 +3689,7 @@
           <div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidSell" inputmode="numeric" placeholder="vazio = não anuncia"><button type="button" data-step="+" data-from="[data-el=bidMax]" aria-label="Aumentar">+</button></div>
           <div class="hint" data-el="bidSellProfit"></div>
           <label><input type="checkbox" data-el="bidOnlySession" checked> Anunciar só as ganhas nos lances desta sessão</label>
+          <label><input type="checkbox" data-el="bidSkipChem" checked> Não anunciar cartas com Shadow ou Hunter aplicado (ficam na lista de transferências)</label>
           <label><input type="checkbox" data-el="bidAutoCollect" checked> Conferir/anunciar sozinho: a cada leilão que termina (enquanto dá lances) e, no fim, esperar os que faltam</label>
           <div class="ed-actions">
             <button class="go" data-act="bidStart">Dar lances</button>
@@ -4632,7 +4644,7 @@
       const bin = parseCoins(el('bidSell').value);
       if (!(bin > 0)) return null;
       const onlyIds = el('bidOnlySession').checked ? new Set(bidSession().ids) : null;
-      return { bin: roundDown(bin), duration: 3600, onlyIds };
+      return { bin: roundDown(bin), duration: 3600, onlyIds, skipChem: el('bidSkipChem').checked };
     }
 
     function updateBidSellProfit() {
@@ -6646,7 +6658,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
+    nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

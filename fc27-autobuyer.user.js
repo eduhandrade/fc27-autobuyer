@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.8.0
+// @version      1.8.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.8.0';
+  const SCRIPT_VERSION = '1.8.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -3421,6 +3421,10 @@
         <button data-tab="log">📜 Log</button>
       </div>
       <section data-pane="targets">
+        <div class="ed-actions" data-el="targetsClean">
+          <button data-act="cleanDone">🧹 Limpar concluídos e desligados</button>
+          <button class="no" data-act="cleanAll">🗑 Apagar todos</button>
+        </div>
         <div data-el="targets"></div>
         <div class="card newcard">
           <div class="card-h">＋ Novo alvo</div>
@@ -3679,8 +3683,27 @@
     ['touchstart', 'touchmove', 'scroll', 'keydown', 'mousedown'].forEach((ev) =>
       panel.addEventListener(ev, () => { lastTouch = Date.now(); }, { passive: true, capture: true }));
 
+    // Limpeza da lista: só desligados/concluídos, ou todos.
+    function cleanTargets(all) {
+      if (engine.running) return win.alert('Pare o bot antes de limpar a lista.');
+      const list = app.state.targets;
+      const gone = all ? list.slice() : list.filter((t) => !t.enabled || targetDone(t));
+      if (!gone.length) return win.alert(all ? 'A lista já está vazia.' : 'Nenhum alvo desligado ou concluído para limpar.');
+      const msg = all
+        ? 'Apagar TODOS os ' + gone.length + ' alvo(s) do Sniper? Não dá para desfazer.'
+        : 'Apagar ' + gone.length + ' alvo(s) desligado(s) ou concluído(s)?\n\n' + gone.slice(0, 12).map((t) => '• ' + t.name).join('\n') +
+          (gone.length > 12 ? '\n… e mais ' + (gone.length - 12) : '') + '\n\nOs ligados continuam.';
+      if (!win.confirm(msg)) return;
+      app.state.targets = all ? [] : list.filter((t) => !gone.includes(t));
+      save();
+      renderTargets();
+      log(gone.length + ' alvo(s) apagado(s) da lista.', 'success');
+    }
+
     function renderTargets() {
       const box = el('targets');
+      const clean = el('targetsClean');
+      if (clean) clean.style.display = app.state.targets.length ? '' : 'none';
       editors.forEach((ed, id) => { if (!app.state.targets.some((t) => t.id === id)) editors.delete(id); });
       if (!app.state.targets.length) {
         box.innerHTML = '<p class="hint">Nenhum alvo ainda. Crie um abaixo.</p>';
@@ -5365,6 +5388,8 @@
           if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
         }
         if (a === 'add') addTarget();
+        if (a === 'cleanDone') cleanTargets(false);
+        if (a === 'cleanAll') cleanTargets(true);
         if (a === 'dockReset') {
           app.state.settings.dock = null;
           save();

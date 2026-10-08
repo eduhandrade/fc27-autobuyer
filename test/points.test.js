@@ -40,3 +40,26 @@ test('compra por nota exata: ouro, sem especial, faixa de preço e quantidade', 
   assert.equal(c.minBuy, 4900);
   assert.equal(c.maxBuy, 7000);
 });
+
+test('lista "mais baratas" vira candidatas por nota, mais baratas primeiro', () => {
+  const c = ab.candidatesFromList([
+    { definitionId: 1, name: 'A', rating: 87, price: 5600 }, { definitionId: 2, name: 'B', rating: 87, price: 5200 },
+    { definitionId: 3, name: 'C', rating: 86, price: 0 }, { definitionId: 2, name: 'B', rating: 87, price: 5200 },
+  ]);
+  assert.deepEqual(c[87].map((x) => x.name), ['B', 'A']);
+  assert.equal(c[86].length, 1);
+});
+
+test('compra de jogador específico: só aquela carta, nota exata, comum', () => {
+  const t = ab.ptsCandidateTarget({ definitionId: 231747, name: 'Fulano' }, 87, 11, 5500, 1);
+  assert.equal(ab.targetProblem(t), null);
+  assert.equal(t.criteria.maskedDefId, 231747);
+  assert.equal(t.id, 'pts-87-231747');
+  assert.equal(ab.mismatchReason({ kind: 'player', definitionId: 231747, rating: 87, special: false }, t), null);
+  assert.equal(ab.mismatchReason({ kind: 'player', definitionId: 231747 + 50331648, rating: 90, special: true }, t), 'outra versão da carta');
+});
+
+test('banco do Web App: jogadores de uma nota, sem ícones', () => {
+  const db = ab.parsePlayersDb({ Players: [{ id: 1, c: 'Base', r: 87 }, { id: 2, c: 'Outro', r: 86 }], LegendsPlayers: [{ id: 3, c: 'Ícone', r: 87 }] });
+  assert.deepEqual(ab.playersOfRating(db, 87).map((p) => p.name), ['Base']);
+});

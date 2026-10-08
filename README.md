@@ -60,8 +60,9 @@ Para os SBCs do FC 27 que pedem uma meta de pontos (Item Score).
 1. Informe a **meta** (ex.: 85.000) e a **solução**: quantidade × nota e o **pagar até** de cada nota (ex.: 14 × ouro 87 até 7.000 + 2 × ouro 86 até 5.000). O bot confere se a soma fecha a meta (tabela de pontos dos guias: 85 = 2.100, 86 = 4.100, 87 = 5.500, 88 = 8.300…).
 2. **📖 Ler o SBC aberto**: com o SBC aberto no Web App, mostra o que o bot encontrou (e lê a meta, se o jogo informar).
 3. **🏠 Procurar no meu clube**: usa cartas do clube e de Não atribuídos **exatamente** dessas notas, ouro comum (sem especiais), fora do seu time; intransferíveis primeiro. Dá para desmarcar qualquer uma.
-4. **🛒 Comprar o que falta**: o próprio módulo compra a nota exata (ouro, não especial) até o seu preço, buscando entre ~70% e 100% dele.
-5. **🧩 Montar entrega no SBC**: manda as compradas para o clube e coloca todas as cartas no SBC aberto, e salva. **Não envia**: confira e envie você.
+4. **Cartas para comprar** (recomendado): em vez de "qualquer ouro 87", escolha jogadores específicos daquela nota. Melhor fonte: no Safari, abra no FUTBIN a página das mais baratas por nota, toque em **🧩 Enviar ao bot** e depois em **📋 Colar lista do FUTBIN**. Sem FUTBIN: **💡 Do banco do Web App** lista os jogadores da nota (sem preço; use **💲 Preço atual das marcadas**).
+5. **🛒 Comprar o que falta**: o módulo busca cada jogador marcado (só aquela carta, comum, até o seu preço), revezando, e para quando a nota completa (a quantidade é compartilhada). Sem jogadores marcados, busca "qualquer ouro daquela nota" entre ~70% e 100% do preço.
+6. **🧩 Montar entrega no SBC**: manda as compradas para o clube e coloca todas as cartas no SBC aberto, e salva. **Não envia**: confira e envie você.
 
 ## SBC pela solução do FUTBIN (aba 🧩 SBC)
 O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts). Ele não busca nada no FUTBIN sozinho: só lê a página que você abriu.

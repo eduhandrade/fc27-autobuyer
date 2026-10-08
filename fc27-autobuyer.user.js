@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.9.0
+// @version      1.10.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.9.0';
+  const SCRIPT_VERSION = '1.10.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -755,15 +755,19 @@
   function parsePlayersDb(json) {
     const out = [];
     const seen = new Set();
-    for (const group of [json && json.Players, json && json.LegendsPlayers]) {
+    for (const [group, legend] of [[json && json.Players, false], [json && json.LegendsPlayers, true]]) {
       for (const p of group || []) {
         if (!p || !(p.id > 0) || seen.has(p.id)) continue;
         seen.add(p.id);
         const full = [p.f, p.l].filter(Boolean).join(' ');
-        out.push({ id: p.id, name: p.c || full || String(p.id), full, rating: p.r || 0 });
+        out.push({ id: p.id, name: p.c || full || String(p.id), full, rating: p.r || 0, legend });
       }
     }
     return out;
+  }
+
+  function playersOfRating(db, rating) {
+    return (db || []).filter((p) => p.rating === rating && !p.legend).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   function searchPlayers(db, query, limit) {
@@ -1454,6 +1458,10 @@
       name(id) {
         const p = db && db.find((x) => x.id === id);
         return p ? p.name : null;
+      },
+      // Cartas base (não ícones) de uma nota exata.
+      byRating(rating) {
+        return load().then((d) => (d && d.length ? { ok: true, list: playersOfRating(d, rating) } : { ok: false, list: [] }));
       },
     };
   }
@@ -3714,6 +3722,14 @@
           <button class="full" data-act="ptsClub">🏠 Procurar no meu clube</button>
           <div data-el="ptsPlan"></div>
           <p class="hint">Carta desmarcada fica protegida: não entra nas próximas buscas. <button type="button" data-act="ptsUnprotect">Desproteger todas</button></p>
+          <div class="ed-h">Cartas para comprar</div>
+          <p class="hint">Em vez de buscar "qualquer ouro 87", o bot busca jogadores específicos dessa nota (resultados limpos, snipe mais fácil).
+            Melhor fonte: no Safari, abra no FUTBIN a página das mais baratas por nota, toque em <b>🧩 Enviar ao bot</b> e depois em <b>Colar lista do FUTBIN</b>.</p>
+          <div class="ed-actions">
+            <button data-act="ptsPasteList">📋 Colar lista do FUTBIN</button>
+            <button data-act="ptsSuggest">💡 Do banco do Web App</button>
+          </div>
+          <button class="full price" data-act="ptsCandPrices">💲 Preço atual das marcadas</button>
           <div class="ed-actions">
             <button class="go" data-act="ptsBuy">🛒 Comprar o que falta</button>
             <button class="no" data-act="sbcStop">Parar</button>
@@ -4664,6 +4680,7 @@
     function importSbc(text) {
       const r = decodeSbc(text);
       if (r.error) return win.alert('Não deu para importar: ' + r.error + '.');
+      if (r.sbc.kind === 'cheapest') { setCandidates(candidatesFromList(r.sbc.players), 'FUTBIN'); el('sbcCode').value = ''; return; }
       if (sbcEngine.running) return win.alert('Pare as compras do SBC atual antes de importar outro.');
       r.sbc.players.forEach((p) => { p.buy = true; p.max = p.price >= 200 ? p.price : 0; p.owned = ''; p.bought = false; });
       app.state.sbc = r.sbc;
@@ -4828,6 +4845,11 @@
           const r = parseInt(String(pu.targetId).slice(4), 10);
           st.bought = st.bought || {};
           (st.bought[r] = st.bought[r] || []).push({ itemId: pu.itemId, paid: pu.price, name: pu.name });
+          // Quantidade compartilhada: completou a nota, desliga os outros jogadores dela.
+          if (!ptsMissing().some((n) => n.rating === r)) {
+            sbcTargets.forEach((t) => { if (t.ptsRating === r) t.enabled = false; });
+            ptsTrace('Ouro ' + r + ' completo.', 'success');
+          }
           save();
           renderPts();
           return;
@@ -4910,6 +4932,20 @@
               ? '<label class="pts-pick" style="opacity:.6"><input type="checkbox" data-pts-unprot="' + x.id + '"> ' + escapeHtml(x.name + ' ' + r) + ' · protegida (marque para liberar)</label>'
               : '<div class="pts-pick" style="opacity:.5">⛔ ' + escapeHtml(x.name + ' ' + r) + ' · ' + escapeHtml(x.why) + '</div>').join('') : ''));
       }
+      // Candidatas para compra (jogadores específicos) por nota.
+      for (const l of st.lines) {
+        const r = parseInt(l.rating, 10);
+        const cands = (st.cands || {})[r];
+        if (!(r > 0) || !cands || !cands.length) continue;
+        const on = cands.filter((c) => c.use).length;
+        rows.push('<div class="ed-h">Comprar ouro ' + r + ' destes jogadores (' + on + ' marcado(s), até ' + (l.max ? fmt(l.max) : '?') + ' cada):</div>' +
+          cands.map((c) => {
+            const m = deps.market && deps.market.get(c.definitionId);
+            const now = m && m.state === 'checking' ? 'agora …' : m && m.price > 0 ? 'agora ' + fmt(m.price) : m ? 'sem anúncio' : '';
+            return '<label class="pts-pick"><input type="checkbox" data-pts-cand="' + r + ':' + c.definitionId + '"' + (c.use ? ' checked' : '') + '> ' +
+              escapeHtml(c.name + ' ' + r) + (c.price ? ' · FUTBIN ' + fmt(c.price) : '') + (now ? ' · ' + now : '') + '</label>';
+          }).join('') + '<button type="button" data-pts-cand-clear="' + r + '">Limpar lista da ' + r + '</button>');
+      }
       el('ptsPlan').innerHTML = rows.join('') || '';
     }
 
@@ -4933,6 +4969,13 @@
         l[e.target.dataset.pts] = parseCoins(e.target.value);
         save();
         renderPts();
+        return;
+      }
+      const cand = e.target.dataset.ptsCand;
+      if (cand) {
+        const [r, id] = cand.split(':').map(Number);
+        const c = ((st.cands || {})[r] || []).find((x) => x.definitionId === id);
+        if (c) { c.use = e.target.checked; save(); }
         return;
       }
       const unprot = e.target.dataset.ptsUnprot;
@@ -5049,6 +5092,58 @@
       }).filter((n) => n.qty > 0);
     }
 
+    function setCandidates(byRating, source) {
+      const st = ptsState();
+      st.cands = st.cands || {};
+      const wanted = st.lines.filter((l) => l.rating > 0).map((l) => parseInt(l.rating, 10));
+      let n = 0;
+      const used = [];
+      for (const [r, list] of Object.entries(byRating)) {
+        if (wanted.length && !wanted.includes(Number(r))) continue;
+        st.cands[r] = list;
+        n += list.length;
+        used.push(list.length + ' de ' + r);
+      }
+      save();
+      renderPts();
+      ptsTrace(n ? n + ' carta(s) candidata(s) (' + source + '): ' + used.join(', ') + '.' : 'Nenhuma carta das notas da solução na lista (' + source + ').', n ? 'success' : 'warn');
+    }
+
+    async function ptsPasteList() {
+      let text = '';
+      try { text = await win.navigator.clipboard.readText(); } catch (e) { text = ''; }
+      if (!text || text.indexOf('FCAB-SBC1:') < 0) {
+        text = win.prompt('Não consegui ler sozinho. Cole aqui o código copiado no FUTBIN:') || '';
+      }
+      const r = decodeSbc(text);
+      if (r.error) return win.alert('Não deu para importar: ' + r.error + '.');
+      setCandidates(candidatesFromList(r.sbc.players), 'FUTBIN');
+    }
+
+    async function ptsSuggest() {
+      const st = ptsState();
+      const need = ptsMissing();
+      const ratings = (need.length ? need : st.lines.filter((l) => l.rating > 0)).map((n) => parseInt(n.rating, 10));
+      if (!ratings.length) return win.alert('Preencha a solução primeiro.');
+      const byRating = {};
+      for (const r of ratings) {
+        const res = await deps.players.byRating(r);
+        if (!res.ok) return win.alert('A lista de jogadores do Web App não está disponível agora. Use a lista do FUTBIN.');
+        byRating[r] = res.list.slice(0, 40).map((p) => ({ definitionId: p.id, name: p.name, price: 0, use: false }));
+      }
+      setCandidates(byRating, 'banco do Web App, sem preço: marque as que quer ou consulte o 💲');
+    }
+
+    function ptsCandPrices(btn) {
+      const st = ptsState();
+      const cards = [];
+      Object.entries(st.cands || {}).forEach(([r, list]) => list.filter((c) => c.use).forEach((c) => cards.push({ name: c.name, definitionId: c.definitionId, rating: Number(r) })));
+      if (!cards.length) return win.alert('Marque pelo menos uma carta da lista.');
+      const label = btn.textContent;
+      checkPrices(cards, { quiet: cards.length > 1, onUpdate: () => renderPtsPlan(),
+        progress: (t) => { btn.textContent = t ? 'Consultando ' + t + ' (toque para parar)' : label; } }).then(renderPtsPlan);
+    }
+
     async function ptsBuy() {
       const st = ptsState();
       if (engine.running) return win.alert('Pare o Sniper antes.');
@@ -5064,10 +5159,16 @@
       if (!win.confirm('Comprar para o SBC por pontos:\n\n' + need.map((n) => n.qty + ' × ouro ' + n.rating + ' (comum, não especial) até ' + fmt(n.max)).join('\n') +
         '\n\nTotal: até ' + fmt(total) + ' moedas.' + (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       const now = Date.now();
-      sbcTargets = need.map((n) => ptsTarget(n.rating, n.qty, n.max, now));
+      sbcTargets = [];
+      for (const n of need) {
+        const cands = ((st.cands || {})[n.rating] || []).filter((c) => c.use);
+        if (cands.length) cands.forEach((c) => sbcTargets.push(ptsCandidateTarget(c, n.rating, n.qty, n.max, now)));
+        else sbcTargets.push(ptsTarget(n.rating, n.qty, n.max, now));
+      }
+      const usingCands = need.filter((n) => ((st.cands || {})[n.rating] || []).some((c) => c.use));
+      if (usingCands.length) ptsTrace('Jogadores específicos: ' + usingCands.map((n) => 'ouro ' + n.rating + ' (' + ((st.cands || {})[n.rating] || []).filter((c) => c.use).length + ' jogador(es))').join(', ') + '.', 'info');
       modBusy = 'SBC';
-      ptsTrace('Comprando: ' + need.map((n) => n.qty + ' × ouro ' + n.rating + ' até ' + fmt(n.max)).join(', ') + '. Busca de ' +
-        sbcTargets.map((t) => fmt(t.minPrice) + ' a ' + fmt(t.maxBuy)).join(' / ') + ' e só compra a nota exata.', 'info');
+      ptsTrace('Comprando: ' + need.map((n) => n.qty + ' × ouro ' + n.rating + ' até ' + fmt(n.max)).join(', ') + '. Só compra a nota exata, comum.', 'info');
       renderPtsStatus();
       const origTrace = sbcTrace;
       try {
@@ -5717,6 +5818,9 @@
         if (a === 'sbcBuy') sbcStartBuying();
         if (a === 'ptsAddLine') { ptsState().lines.push({ qty: 0, rating: 0, max: 0 }); save(); renderPts(); }
         if (a === 'ptsRead') ptsRead();
+        if (a === 'ptsPasteList') ptsPasteList();
+        if (a === 'ptsSuggest') ptsSuggest();
+        if (a === 'ptsCandPrices') ptsCandPrices(act);
         if (a === 'ptsDiag') {
           const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'indisponível' };
           const text = adapter.sbcDiagnosticText ? adapter.sbcDiagnosticText(found) : 'indisponível';
@@ -5829,6 +5933,14 @@
 
     el('sbcList').addEventListener('input', onSbcInput);
     ['ptsTarget', 'ptsLines', 'ptsPlan'].forEach((k) => el(k).addEventListener('change', onPtsInput));
+    el('ptsPlan').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pts-cand-clear]');
+      if (!b) return;
+      const st = ptsState();
+      delete (st.cands || {})[b.dataset.ptsCandClear];
+      save();
+      renderPts();
+    });
     el('ptsLines').addEventListener('click', (e) => {
       const d = e.target.closest('[data-pts-del]');
       if (!d) return;
@@ -6011,6 +6123,7 @@
       return {
         sbc: {
           name: String(data.name || 'SBC'),
+          kind: data.kind === 'cheapest' ? 'cheapest' : 'solution',
           url: String(data.url || ''),
           total: data.total > 0 ? data.total : 0,
           at: data.at || Date.now(),
@@ -6233,6 +6346,44 @@
     };
   }
 
+  // Alvo de compra de um jogador específico daquela nota (mais preciso que
+  // buscar "qualquer ouro"): só aquela carta, comum, até o preço.
+  function ptsCandidateTarget(c, rating, qty, max, now) {
+    return {
+      id: 'pts-' + rating + '-' + c.definitionId,
+      name: 'Pontos: ' + c.name + ' ' + rating,
+      kind: 'player',
+      criteria: { type: 'player', maskedDefId: baseDefId(c.definitionId) },
+      labels: { player: c.name },
+      playStyles: [],
+      definitionId: c.definitionId,
+      minRating: rating,
+      maxRating: rating,
+      noSpecial: true,
+      maxCount: qty,
+      bought: 0,
+      maxBuy: roundDown(max),
+      sellPrice: 0,
+      enabled: true,
+      ptsRating: rating,
+      createdAt: now || Date.now(),
+      card: { name: c.name, definitionId: c.definitionId, rating },
+    };
+  }
+
+  // Lista "mais baratas por nota" do FUTBIN → candidatas por nota.
+  function candidatesFromList(players) {
+    const out = {};
+    for (const p of players || []) {
+      if (!(p.definitionId > 0) || !(p.rating > 0)) continue;
+      const list = out[p.rating] = out[p.rating] || [];
+      if (list.some((x) => x.definitionId === p.definitionId)) continue;
+      list.push({ definitionId: p.definitionId, name: p.name, price: p.price || 0, use: true });
+    }
+    Object.values(out).forEach((list) => list.sort((a, b) => (a.price || Infinity) - (b.price || Infinity)));
+    return out;
+  }
+
   // Posição da vaga do elenco → posição "simples" (RCB → CB, LS → ST...).
   const SLOT_ALIASES = { RCB: 'CB', LCB: 'CB', SW: 'CB', RCM: 'CM', LCM: 'CM', RDM: 'CDM', LDM: 'CDM', RAM: 'CAM', LAM: 'CAM', RS: 'ST', LS: 'ST' };
   function simplePosition(p) {
@@ -6297,7 +6448,8 @@
     btn.addEventListener('click', async () => {
       const players = parseSbcCards(doc.body);
       const total = players.reduce((n, p) => n + (p.price || 0), 0);
-      const sbc = { name: sbcTitle(doc), url: win.location.href, total, at: Date.now(), players };
+      const cheapest = /cheapest|by-rating|rating/i.test(win.location.pathname);
+      const sbc = { name: sbcTitle(doc), url: win.location.href, total, at: Date.now(), players, kind: cheapest ? 'cheapest' : 'solution' };
       const code = encodeSbc(sbc);
       const ok = await copy(code);
       const noPrice = players.filter((p) => !p.price).length;
@@ -6305,7 +6457,9 @@
       show('<b>' + esc(sbc.name) + '</b>: ' + players.length + ' jogador(es)<br>' +
         players.map((p) => esc(p.name + ' ' + p.rating + ' ' + p.position) + ' — ' + (p.price ? fmt(p.price) : 'sem preço')).join('<br>') +
         (noPrice ? '<p>⚠️ ' + noPrice + ' sem preço. Toque no selo verde do FUTBIN até aparecerem os preços e toque em "Enviar ao bot" de novo.</p>' : '') +
-        (ok ? '<p>✅ Copiado. Agora abra o Web App da EA → ⚡ → aba 🧩 SBC → <b>Colar solução</b>.</p>'
+        (ok ? (sbc.kind === 'cheapest'
+          ? '<p>✅ Copiado. No Web App: ⚡ → aba 🧩 SBC → SBC por pontos → <b>Colar lista do FUTBIN</b>.</p>'
+          : '<p>✅ Copiado. Agora abra o Web App da EA → ⚡ → aba 🧩 SBC → <b>Colar solução</b>.</p>')
           : '<p>Não consegui copiar sozinho. Toque e segure no código abaixo → Selecionar tudo → Copiar:</p>') +
         '<textarea readonly style="width:100%;height:70px;font-size:11px">' + esc(code) + '</textarea>');
     });
@@ -6421,7 +6575,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

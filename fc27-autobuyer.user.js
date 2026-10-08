@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.8.2
+// @version      1.8.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.8.2';
+  const SCRIPT_VERSION = '1.8.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2882,12 +2882,14 @@
         if (!svc || typeof svc.search !== 'function' || !DTO) return { success: false, missing: true, items: [] };
         const all = [];
         const seen = new Set();
-        for (let page = 0; page < (maxPages || 25); page++) {
+        let offset = 0;
+        let pages = 0;
+        for (let page = 0; page < (maxPages || 40); page++) {
           const dto = new DTO();
           try { dto.type = 'player'; } catch (e) { /* só leitura */ }
           try { dto.level = 'gold'; } catch (e) { /* só leitura */ }
           try { dto.count = 91; } catch (e) { /* só leitura */ }
-          try { dto.offset = page * 90; } catch (e) { /* só leitura */ }
+          try { dto.offset = offset; } catch (e) { /* só leitura */ }
           let observable;
           try { observable = svc.search(dto); } catch (e) { return { success: all.length > 0, status: 'erro ' + e.message, items: all }; }
           if (!observable || typeof observable.observe !== 'function') break;
@@ -2900,52 +2902,83 @@
             all.push(it);
             added++;
           }
-          if (list.length < 90 || !added) break;
+          pages++;
+          // O FC 27 pode devolver páginas menores: continua enquanto vierem cartas novas.
+          if (!list.length || !added) break;
+          offset += list.length;
           await sleepMs(500);
         }
-        return { success: true, items: all };
+        return { success: true, items: all, pages };
       },
 
       // IDs das cartas do time ativo (para não usar no SBC).
       async activeSquadIds() {
         const ids = new Set();
         const tried = [];
-        const take = (x, depth) => {
-          if (!x || typeof x !== 'object' || depth > 3) return;
-          const arr = findItemArray(x) || [];
-          arr.forEach((it) => { const id = numberOf(it, 'id') || (it.itemData && it.itemData.id); if (id > 0) ids.add(id); });
-          for (const fn of ['getPlayers', 'getFieldPlayers', 'getSubstitutes', 'getReserves']) {
+        const shapes = [];
+        const addItem = (it) => {
+          if (!it || typeof it !== 'object') return;
+          const id = numberOf(it, 'id') || (it.itemData && it.itemData.id);
+          if (id > 0 && (it.definitionId || it.rating || it.itemData || it._staticData || typeof it.getStaticData === 'function')) ids.add(id);
+        };
+        const take = (x, depth, seen) => {
+          seen = seen || new Set();
+          if (!x || typeof x !== 'object' || depth > 4 || seen.has(x) || x.nodeType) return;
+          seen.add(x);
+          (findItemArray(x) || []).forEach(addItem);
+          for (const fn of ['getPlayers', 'getFieldPlayers', 'getSubstitutes', 'getReserves', 'getItems']) {
             try {
-              if (typeof x[fn] === 'function') {
-                (x[fn]() || []).forEach((sl) => {
-                  const it = sl && (sl.item || sl._item || (typeof sl.getItem === 'function' ? sl.getItem() : sl));
-                  const id = it && numberOf(it, 'id');
-                  if (id > 0) ids.add(id);
-                });
-              }
+              if (typeof x[fn] === 'function') (x[fn]() || []).forEach((sl) => addItem(sl && (sl.item || sl._item || (typeof sl.getItem === 'function' ? sl.getItem() : sl))));
             } catch (e) { /* ignora */ }
           }
-          for (const k of ['squad', '_squad', 'activeSquad', '_activeSquad', 'data']) if (x[k] && x[k] !== x) take(x[k], depth + 1);
+          let keys = [];
+          try { keys = Object.keys(x); } catch (e) { keys = []; }
+          for (const k of keys) {
+            let v;
+            try { v = x[k]; } catch (e) { continue; }
+            if (Array.isArray(v)) v.forEach((sl) => { if (sl && typeof sl === 'object') addItem(sl.item || sl._item || sl); });
+            else if (v && typeof v === 'object' && /squad|player|slot|data|item/i.test(k)) take(v, depth + 1, seen);
+          }
+        };
+        const call = async (svc, fn, arg) => {
+          let res = arg === undefined ? svc[fn]() : svc[fn](arg);
+          if (res && typeof res.observe === 'function') res = await observe(res, 15000);
+          return res;
         };
         const sources = [['services', 'Squad'], ['services', 'Squads'], ['repositories', 'Squad'], ['repositories', 'Squads']];
         for (const [root, name] of sources) {
           const svc = G(root) && G(root)[name];
           if (!svc) continue;
-          // Propriedades já carregadas (time ativo em memória).
+          let activeId = null;
           for (const k of Object.keys(svc)) {
-            if (/active/i.test(k)) { tried.push(root + '.' + name + '.' + k); take(svc[k], 0); }
+            if (!/active/i.test(k)) continue;
+            const v = svc[k];
+            tried.push(root + '.' + name + '.' + k);
+            shapes.push(k + '=' + shapeOf(v).slice(0, 80));
+            if (typeof v === 'number') activeId = v;
+            else take(v, 0);
           }
-          for (const fn of methodNames(svc).filter((n) => /active/i.test(n) && /^(get|request|load|fetch)/i.test(n))) {
+          const fns = methodNames(svc);
+          for (const fn of fns.filter((n) => /active/i.test(n) && /^(get|request|load|fetch)/i.test(n))) {
             tried.push(root + '.' + name + '.' + fn + '()');
             try {
-              let res = svc[fn]();
-              if (res && typeof res.observe === 'function') res = await observe(res, 15000);
-              take(res, 0);
+              const res = await call(svc, fn);
+              if (typeof res === 'number') activeId = res;
+              else if (res && typeof res.data === 'number') activeId = res.data;
+              else take(res, 0);
             } catch (e) { /* tenta a próxima */ }
+          }
+          // Só temos o número do time ativo: pede o time por esse número.
+          if (ids.size < 11 && activeId != null) {
+            for (const fn of fns.filter((n) => /^(get|request|load|fetch)Squad(ById)?$|^(get|request|load)Squad/i.test(n) && !/active|ids?$|list|all/i.test(n)).slice(0, 4)) {
+              tried.push(root + '.' + name + '.' + fn + '(' + activeId + ')');
+              try { take(await call(svc, fn, activeId), 0); } catch (e) { /* tenta a próxima */ }
+              if (ids.size >= 11) break;
+            }
           }
           if (ids.size >= 11) return { success: true, ids, method: tried[tried.length - 1] };
         }
-        return { success: ids.size > 0, ids, why: tried.length ? 'tentei ' + tried.slice(0, 6).join(', ') : 'não achei o serviço de elencos', tried };
+        return { success: false, ids, why: tried.length ? 'tentei ' + tried.slice(0, 8).join(', ') : 'não achei o serviço de elencos', tried, shapes };
       },
 
       // Marcas na própria carta de que ela está no time ativo.
@@ -4762,7 +4795,10 @@
         rows.push('<div class="ed-h">Ouro ' + r + ': precisa ' + l.qty + ' · do clube ' + use.length + (p ? ' (de ' + p.available + ' achadas)' : '') +
           ' · compradas ' + got + ' · <b>falta comprar ' + missing + '</b>' + (missing && l.max ? ' até ' + fmt(l.max) : '') + '</div>' +
           (p ? p.items.map((x) => '<label class="pts-pick"><input type="checkbox" data-pts-use="' + r + ':' + x.id + '"' + (x.use ? ' checked' : '') + '> ' +
-            escapeHtml(x.name + ' ' + r) + (x.untradeable ? ' · intransferível' : '') + '</label>').join('') : ''));
+            escapeHtml(x.name + ' ' + r) + (x.untradeable ? ' · intransferível' : '') + '</label>').join('') +
+            (p.out || []).map((x) => x.why === 'protegida'
+              ? '<label class="pts-pick" style="opacity:.6"><input type="checkbox" data-pts-unprot="' + x.id + '"> ' + escapeHtml(x.name + ' ' + r) + ' · protegida (marque para liberar)</label>'
+              : '<div class="pts-pick" style="opacity:.5">⛔ ' + escapeHtml(x.name + ' ' + r) + ' · ' + escapeHtml(x.why) + '</div>').join('') : ''));
       }
       el('ptsPlan').innerHTML = rows.join('') || '';
     }
@@ -4787,6 +4823,13 @@
         l[e.target.dataset.pts] = parseCoins(e.target.value);
         save();
         renderPts();
+        return;
+      }
+      const unprot = e.target.dataset.ptsUnprot;
+      if (unprot && e.target.checked) {
+        app.state.ptsProtected = (app.state.ptsProtected || []).filter((id) => id !== Number(unprot));
+        save();
+        ptsTrace('Carta liberada. Toque em "Procurar no meu clube" de novo para usá-la.', 'info');
         return;
       }
       const use = e.target.dataset.ptsUse;
@@ -4862,8 +4905,18 @@
         const plan = planPtsFromClub(lines, items, exclude);
         st.picks = {};
         plan.picks.forEach((p) => {
-          st.picks[p.rating] = { available: p.available, items: p.items.map((it) => ({ id: it.id, name: it.name, untradeable: !!it.untradeable, use: true })) };
+          const out = items.filter((it) => it.rating === p.rating && it.kind === 'player' && !p.items.includes(it))
+            .map((it) => ({ id: it.id, name: it.name,
+              why: squad.ids.has(it.id) || (it.raw && adapter.inActiveSquad && adapter.inActiveSquad(it.raw)) ? 'no seu time'
+                : protectedIds.has(it.id) ? 'protegida' : it.special === true ? 'especial' : 'sobrando' }));
+          st.picks[p.rating] = {
+            available: p.available,
+            items: p.items.map((it) => ({ id: it.id, name: it.name, untradeable: !!it.untradeable, use: true })),
+            out,
+          };
         });
+        if (!squad.success && squad.shapes && squad.shapes.length) ptsTrace('  (diagnóstico do time: ' + squad.shapes.join(' · ') + ')', 'muted');
+        ptsTrace('Clube: ' + (club.pages || 1) + ' página(s) lida(s).', 'muted');
         save();
         renderPts();
         ptsTrace(plan.need.length ? 'Falta comprar: ' + plan.need.map((n) => n.qty + ' × ouro ' + n.rating).join(', ') + '.' : 'Seu clube cobre a solução inteira! ✅',

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.0
+// @version      1.10.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.0';
+  const SCRIPT_VERSION = '1.10.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -6176,13 +6176,30 @@
     const countIn = (el) => photos.filter((p) => el.contains(p)).length;
     const seen = new Set();
     const cards = [];
+    // Páginas "mais baratas por nota": a nota fica no título da seção
+    // ("87 Rated Players"), não em cada linha.
+    const headings = Array.from(root.querySelectorAll('h1, h2, h3, h4, h5, div, span, a, p'))
+      .filter((h) => {
+        const t = (h.textContent || '').trim();
+        return t.length < 40 && /^(\d{2})\s*Rated\s+Players/i.test(t);
+      })
+      .filter((h, i, all) => !all.some((o) => o !== h && h.contains(o)));
+    const sectionRating = (el) => {
+      let r = 0;
+      for (const h of headings) {
+        // eslint-disable-next-line no-bitwise
+        if (h.compareDocumentPosition(el) & 4) r = parseInt(h.textContent.trim(), 10);
+      }
+      return r;
+    };
     for (const photo of photos) {
       // Sobe até o maior bloco que ainda contém só esta foto: é a carta.
       let card = photo;
-      while (card.parentElement && card.parentElement !== root && countIn(card.parentElement) === 1) card = card.parentElement;
+      while (card.parentElement && card.parentElement !== root && countIn(card.parentElement) === 1 &&
+        !headings.some((h) => card.parentElement.contains(h))) card = card.parentElement;
       if (seen.has(card)) continue;
       seen.add(card);
-      const p = readSbcCard(card, playerIdOf(photo));
+      const p = readSbcCard(card, playerIdOf(photo), headings.length ? sectionRating(photo) : 0);
       if (p) cards.push(p);
     }
     return cards;
@@ -6193,7 +6210,7 @@
     return text.split(/[\n\r\t]+|\s{2,}/).map((t) => t.trim()).filter(Boolean);
   }
 
-  function readSbcCard(card, definitionId) {
+  function readSbcCard(card, definitionId, sectionRating) {
     const tokens = textTokens(card);
     const words = [];
     tokens.forEach((t) => t.split(/\s+/).forEach((w) => words.push(w)));
@@ -6208,11 +6225,15 @@
         if (!rating && n >= 40 && n <= 99) rating = n;
         continue;
       }
-      // Preços: 650, 1,200, 12.5K, 1.2M (as notas e atributos têm 2 dígitos).
-      if (/^\d{1,3}([.,]\d{3})+$|^\d{3,}$|^\d+([.,]\d+)?[KkMm]$/.test(w)) {
-        const v = parseShortPrice(w);
-        if (v >= 150) prices.push(v);
-      }
+    }
+    // Preços: 650, 1,200, 12.5K, 1.2M (notas e atributos têm 2 dígitos). Às
+    // vezes vêm colados ("6.9K5.5K"), então procura no texto inteiro.
+    const flat = tokens.join(' ');
+    const priceRe = /\d+(?:[.,]\d+)?[KkMm](?![a-z])|\d{1,3}(?:[.,]\d{3})+|\d{3,}/g;
+    let pm;
+    while ((pm = priceRe.exec(flat))) {
+      const v = parseShortPrice(pm[0]);
+      if (v >= 150) prices.push(v);
     }
     // Preço por atributo data-*, quando a página informa.
     let attrPrice = 0;
@@ -6227,7 +6248,13 @@
         else if (/ps|console|xbox|xb/i.test(a.name)) attrPrice = attrPrice || v;
       }
     }
-    const name = sbcCardName(card, tokens);
+    const name = sbcCardName(card, tokens).replace(/\s*\([A-Z]{1,3}\)\s*$/, '');
+    // Linha sem nota própria: vale a nota da seção.
+    if (sectionRating > 0) rating = sectionRating;
+    if (!position) {
+      const m = (tokens.join(' ').match(/\(([A-Z]{1,3})\)/) || [])[1];
+      if (m && SBC_POSITIONS.includes(m)) position = m;
+    }
     if (!definitionId || !rating) return null;
     return {
       definitionId,
@@ -6423,9 +6450,12 @@
     doc.body.appendChild(btn);
     doc.body.appendChild(box);
 
+    // Nas páginas de SBC o botão fica sempre visível (se não ler nada, mostra
+    // um diagnóstico em vez de sumir).
+    const sbcPage = () => /squad-building|sbc|cheapest|squad/i.test(win.location.pathname);
     const scan = () => {
       const n = parseSbcCards(doc.body).length;
-      btn.style.display = n >= 3 ? 'block' : 'none';
+      btn.style.display = n >= 3 || sbcPage() ? 'block' : 'none';
     };
     scan();
     win.setInterval(scan, 2000);
@@ -6447,6 +6477,16 @@
 
     btn.addEventListener('click', async () => {
       const players = parseSbcCards(doc.body);
+      if (!players.length) {
+        const imgs = Array.from(doc.querySelectorAll('img')).map((i) => i.getAttribute('src') || i.getAttribute('data-src') || '').filter(Boolean);
+        const sample = imgs.filter((u) => /player|card|futbin/i.test(u)).slice(0, 4);
+        const diag = 'imagens: ' + imgs.length + ' · exemplos: ' + sample.join(' , ') + ' · títulos: ' +
+          Array.from(doc.querySelectorAll('h1,h2,h3')).map((h) => h.textContent.trim()).filter(Boolean).slice(0, 5).join(' / ');
+        const esc0 = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+        show('<b>Não reconheci cartas nesta página.</b> Role a página para carregar as cartas e tente de novo. Se continuar, copie o texto abaixo e mande no chat:' +
+          '<textarea readonly style="width:100%;height:90px;font-size:11px">' + esc0(win.location.pathname + ' · ' + diag) + '</textarea>');
+        return;
+      }
       const total = players.reduce((n, p) => n + (p.price || 0), 0);
       const cheapest = /cheapest|by-rating|rating/i.test(win.location.pathname);
       const sbc = { name: sbcTitle(doc), url: win.location.href, total, at: Date.now(), players, kind: cheapest ? 'cheapest' : 'solution' };

@@ -55,6 +55,14 @@ O bot só compra cartas de técnico: jogadores e consumíveis que aparecerem sã
 No Web App: **Transferências → Consumables → Manager Leagues**, escolha a liga e abra o ⚡ — o Novo alvo vem como **🏆 Liga de técnico** com a liga preenchida (ou escolha à mão no Novo alvo).
 O bot só compra o consumível de liga de técnico: ignora jogadores, técnicos e estilos de química, e confere a liga de cada carta (se não der para confirmar, não compra).
 
+## SBC por pontos (aba 🧩 SBC → 📊 SBC por pontos)
+Para os SBCs do FC 27 que pedem uma meta de pontos (Item Score).
+1. Informe a **meta** (ex.: 85.000) e a **solução**: quantidade × nota e o **pagar até** de cada nota (ex.: 14 × ouro 87 até 7.000 + 2 × ouro 86 até 5.000). O bot confere se a soma fecha a meta (tabela de pontos dos guias: 85 = 2.100, 86 = 4.100, 87 = 5.500, 88 = 8.300…).
+2. **📖 Ler o SBC aberto**: com o SBC aberto no Web App, mostra o que o bot encontrou (e lê a meta, se o jogo informar).
+3. **🏠 Procurar no meu clube**: usa cartas do clube e de Não atribuídos **exatamente** dessas notas, ouro comum (sem especiais), fora do seu time; intransferíveis primeiro. Dá para desmarcar qualquer uma.
+4. **🛒 Comprar o que falta**: o próprio módulo compra a nota exata (ouro, não especial) até o seu preço, buscando entre ~70% e 100% dele.
+5. **🧩 Montar entrega no SBC**: manda as compradas para o clube e coloca todas as cartas no SBC aberto, e salva. **Não envia**: confira e envie você.
+
 ## SBC pela solução do FUTBIN (aba 🧩 SBC)
 O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts). Ele não busca nada no FUTBIN sozinho: só lê a página que você abriu.
 1. No FUTBIN, abra o SBC e a **solução mais barata**. Toque no selo verde até aparecerem os **preços** (o script usa o preço de console, a primeira linha).

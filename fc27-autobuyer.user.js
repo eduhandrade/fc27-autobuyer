@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.7.2
+// @version      1.8.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.7.2';
+  const SCRIPT_VERSION = '1.8.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -532,6 +532,7 @@
     if (target.kind === 'player') {
       if (it.kind !== 'player') return 'não é jogador';
       if (target.definitionId > 0 && it.definitionId !== target.definitionId) return 'outra versão da carta';
+      if (target.noSpecial && it.special === true) return 'carta especial';
       const need = (want, got, article, noun) => {
         if (isEmptyValue(want)) return null;
         if (got == null) return 'não deu para confirmar ' + article + ' ' + noun;
@@ -2178,6 +2179,8 @@
       kind: type === 'player' ? 'player' : type || null,
       lastSalePrice: d.lastSalePrice || 0,
       untradeable: !!d.untradeable,
+      rarity: typeof d.rareflag === 'number' ? d.rareflag : null,
+      special: typeof d.rareflag === 'number' ? d.rareflag > 1 : null,
       marketAverage: d.marketAverage > 0 ? d.marketAverage : null,
       minPrice: d.marketDataMinPrice || 0,
       maxPrice: d.marketDataMaxPrice || 0,
@@ -2644,11 +2647,41 @@
         bidState: a.bidState || null,
         tradeOwner: !!a.tradeOwner,
         untradeable: readFlag(raw, ['untradeable', 'isUntradeable']),
+        rarity: rarityOf(raw),
+        special: isSpecialItem(raw),
+        score: itemScoreOf(raw),
         marketAverage: eaMarketAverage(raw),
         minPrice: priceLimit(raw, 'min'),
         maxPrice: priceLimit(raw, 'max'),
         pile: numberOf(raw, 'pile'),
       };
+    }
+
+    // Raridade da EA: 0 comum, 1 rara, 2+ especial (TOTW, promo, herói...).
+    function rarityOf(raw) {
+      for (const k of ['rareflag', 'rarityId', 'rareFlag']) {
+        const v = numberOf(raw, k);
+        if (typeof v === 'number' && v >= 0) return v;
+      }
+      return null;
+    }
+
+    function isSpecialItem(raw) {
+      for (const k of ['isSpecial', 'isSpecialItem']) {
+        const v = readFlag(raw, [k]);
+        if (v === true) return true;
+      }
+      const r = rarityOf(raw);
+      return r == null ? null : r > 1;
+    }
+
+    // Pontos (Item Score) informados pelo próprio Web App, se houver.
+    function itemScoreOf(raw) {
+      for (const k of ['itemScore', 'sbcScore', 'galleryScore', 'score', 'getItemScore', 'getScore']) {
+        const v = numberOf(raw, k);
+        if (typeof v === 'number' && v > 0) return v;
+      }
+      return 0;
     }
 
     // Faixa de preço permitida pela EA para anunciar a carta.
@@ -2842,6 +2875,82 @@
         return Object.assign(result(response), { success: !!response.success || list.length > 0, owned, items });
       },
 
+      // Jogadores ouro do clube, página por página (o clube pode ser grande).
+      async clubGoldPlayers(lookup, maxPages) {
+        const svc = G('services') && G('services').Club;
+        const DTO = G('UTSearchCriteriaDTO');
+        if (!svc || typeof svc.search !== 'function' || !DTO) return { success: false, missing: true, items: [] };
+        const all = [];
+        const seen = new Set();
+        for (let page = 0; page < (maxPages || 25); page++) {
+          const dto = new DTO();
+          try { dto.type = 'player'; } catch (e) { /* só leitura */ }
+          try { dto.level = 'gold'; } catch (e) { /* só leitura */ }
+          try { dto.count = 91; } catch (e) { /* só leitura */ }
+          try { dto.offset = page * 90; } catch (e) { /* só leitura */ }
+          let observable;
+          try { observable = svc.search(dto); } catch (e) { return { success: all.length > 0, status: 'erro ' + e.message, items: all }; }
+          if (!observable || typeof observable.observe !== 'function') break;
+          const response = await observe(observable, 15000);
+          const list = findItemArray(response) || [];
+          let added = 0;
+          for (const it of list.map(convert(lookup)).filter(Boolean)) {
+            if (!(it.id > 0) || seen.has(it.id)) continue;
+            seen.add(it.id);
+            all.push(it);
+            added++;
+          }
+          if (list.length < 90 || !added) break;
+          await sleepMs(500);
+        }
+        return { success: true, items: all };
+      },
+
+      // IDs das cartas do time ativo (para não usar no SBC).
+      async activeSquadIds() {
+        const svc = G('services') && G('services').Squad;
+        const ids = new Set();
+        if (!svc) return { success: false, ids, why: 'services.Squad não encontrado' };
+        const names = methodNames(svc).filter((n) => /active/i.test(n) && /^(get|request|load|fetch)/i.test(n));
+        for (const fn of names) {
+          try {
+            const obs = svc[fn]();
+            const response = obs && typeof obs.observe === 'function' ? await observe(obs, 15000) : obs;
+            const grab = (x) => {
+              const arr = findItemArray(x) || [];
+              arr.forEach((it) => { const id = numberOf(it, 'id') || (it.itemData && it.itemData.id); if (id > 0) ids.add(id); });
+            };
+            grab(response);
+            const sq = response && response.data && (response.data.squad || response.data);
+            if (sq && typeof sq.getPlayers === 'function') {
+              sq.getPlayers().forEach((sl) => { const it = sl && (sl.item || sl._item || sl); const id = it && numberOf(it, 'id'); if (id > 0) ids.add(id); });
+            }
+            if (ids.size) return { success: true, ids, method: fn };
+          } catch (e) { /* tenta a próxima */ }
+        }
+        return { success: false, ids, why: names.length ? 'funções ' + names.join(', ') + ' não trouxeram o time' : 'nenhuma função de time ativo' };
+      },
+
+      // O que o desafio aberto tem por dentro (para ajustar a montagem).
+      sbcDescribe(found) {
+        const out = [];
+        const nums = (obj, prefix) => {
+          if (!obj || typeof obj !== 'object') return;
+          for (const k of Object.keys(obj)) {
+            let v;
+            try { v = obj[k]; } catch (e) { continue; }
+            if (typeof v === 'number' && /score|point|target|progress|goal|value|req/i.test(k)) out.push(prefix + k + '=' + v);
+          }
+        };
+        nums(found.challenge, 'desafio.');
+        nums(found.squad, 'elenco.');
+        out.push('métodos do desafio: ' + methodNames(found.challenge).slice(0, 25).join(', '));
+        out.push('métodos do elenco: ' + methodNames(found.squad).filter((n) => /item|player|slot|add|set|remove|score/i.test(n)).slice(0, 25).join(', '));
+        const sbc = G('services') && G('services').SBC;
+        if (sbc) out.push('services.SBC: ' + methodNames(sbc).slice(0, 25).join(', '));
+        return out;
+      },
+
       async moveToClub(raw) {
         const Pile = G('ItemPile');
         const svc = G('services').Item;
@@ -2880,13 +2989,13 @@
       },
 
       // Vagas do elenco do desafio: [{ index, position, item }].
-      sbcSlots(squad) {
+      sbcSlots(squad, max) {
         let list = [];
         for (const fn of ['getFieldPlayers', 'getPlayers', 'getSlots']) {
           try { if (typeof squad[fn] === 'function') { list = squad[fn]() || []; if (list.length) break; } } catch (e) { /* ignora */ }
         }
         if (!list.length) list = squad._players || squad.players || [];
-        return Array.from(list).slice(0, 11).map((slot, index) => {
+        return Array.from(list).slice(0, max || 11).map((slot, index) => {
           let pos = null;
           try {
             const p = slot && (typeof slot.getPosition === 'function' ? slot.getPosition() : slot.position || slot._position);
@@ -2907,8 +3016,8 @@
             picks.forEach((p) => squad.addItemToSlot(p.index, p.raw));
             method = 'addItemToSlot';
           } else if (typeof squad.setPlayers === 'function') {
-            const cur = this.sbcSlots(squad).map((sl) => sl.item);
-            while (cur.length < 11) cur.push(null);
+            const cur = this.sbcSlots(squad, found.maxSlots || 11).map((sl) => sl.item);
+            while (cur.length < (found.maxSlots || 11)) cur.push(null);
             picks.forEach((p) => { cur[p.index] = p.raw; });
             squad.setPlayers(cur, true);
             method = 'setPlayers';
@@ -3077,6 +3186,7 @@
           ledger: migrateLedger(saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {}),
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
           bids: pruneBids(saved.bids),
+          pts: saved.pts && Array.isArray(saved.pts.lines) ? saved.pts : null,
           bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
         };
       },
@@ -3127,6 +3237,10 @@
 #fcab-panel button:disabled{opacity:.4}
 #fcab-panel button.go{background:#1db954;color:#fff}
 #fcab-panel button.no{background:#c0392b;color:#fff}
+#fcab-panel .pts-row{display:grid;grid-template-columns:56px auto 56px 1fr 30px;gap:6px;align-items:center;margin-top:8px}
+#fcab-panel .pts-row span{font-size:13px;color:#9aa0a6}
+#fcab-panel .pts-row button{padding:6px 0}
+#fcab-panel .pts-pick{display:flex;gap:8px;align-items:center;padding:4px 0;font-size:13px;border-top:1px solid #2a2d33}
 #fcab-panel .sbc-row{display:grid;grid-template-columns:26px 1fr 86px;gap:8px;align-items:center;padding:7px 0;border-top:1px solid #2a2d33}
 #fcab-panel .sbc-row input[type=checkbox]{width:22px;height:22px}
 #fcab-panel .sbc-head{font-size:11px;color:#9aa0a6;border-top:0;padding-bottom:0}
@@ -3388,6 +3502,26 @@
       </section>
       <section data-pane="sbc" hidden>
         <div class="card">
+          <div class="card-h">📊 SBC por pontos</div>
+          <p class="hint">Para os SBCs de pontos (Item Score). Informe a meta e a solução (ex.: 14 × ouro 87 + 2 × ouro 86). O bot confere os pontos,
+            usa as cartas do seu clube dessas notas (fora do time e sem especiais), compra o que faltar pelo preço que você escolher e monta a entrega. O envio é seu.</p>
+          <label>Meta de pontos</label>
+          <input data-el="ptsTarget" inputmode="numeric" placeholder="Ex.: 85000">
+          <div data-el="ptsLines"></div>
+          <button class="full" data-act="ptsAddLine">+ Adicionar nota</button>
+          <div class="result" data-el="ptsCheck"></div>
+          <button class="full" data-act="ptsRead">📖 Ler o SBC aberto no Web App</button>
+          <button class="full" data-act="ptsClub">🏠 Procurar no meu clube</button>
+          <div data-el="ptsPlan"></div>
+          <div class="ed-actions">
+            <button class="go" data-act="ptsBuy">🛒 Comprar o que falta</button>
+            <button class="no" data-act="sbcStop">Parar</button>
+          </div>
+          <div class="result" data-el="ptsStatus" hidden></div>
+          <button class="full price" data-act="ptsAssemble">🧩 Montar entrega no SBC</button>
+          <div class="bidlog" data-el="ptsLog" hidden></div>
+        </div>
+        <div class="card">
           <div class="card-h">🧩 SBC pela solução do FUTBIN</div>
           <p class="hint">1) No Safari, abra no FUTBIN a solução mais barata do SBC e toque no selo verde até aparecerem os preços (são de console).
             2) Toque em <b>🧩 Enviar ao bot</b>. 3) Volte aqui e toque em <b>Colar solução</b>. 4) Confira quanto pagar por cada um e toque em <b>Comprar os marcados</b> (as compras acontecem aqui mesmo, sem mexer no Sniper). 5) Abra o desafio no Web App e toque em <b>Montar elenco</b>.</p>
@@ -3500,7 +3634,7 @@
       if (tab === 'log') renderLog();
       if (tab === 'profit') renderProfit();
       if (tab === 'bids') renderBidTargets();
-      if (tab === 'sbc') renderSbc();
+      if (tab === 'sbc') { renderSbc(); renderPts(); }
     }
 
     function renderFutbinError() {
@@ -4467,6 +4601,15 @@
       getState: () => ({ settings: Object.assign({}, app.state.settings, { maxBuys: 0, budget: 0 }), targets: sbcTargets }),
       log: (m, l) => { sbcTrace(m, l); log('SBC: ' + m, l); },
       onPurchase: (pu) => {
+        if (pu.targetId && String(pu.targetId).indexOf('pts-') === 0) {
+          const st = ptsState();
+          const r = parseInt(String(pu.targetId).slice(4), 10);
+          st.bought = st.bought || {};
+          (st.bought[r] = st.bought[r] || []).push({ itemId: pu.itemId, paid: pu.price, name: pu.name });
+          save();
+          renderPts();
+          return;
+        }
         const s = app.state.sbc;
         const p = s && s.players.find((x) => x.definitionId === pu.definitionId && !x.bought);
         if (p) {
@@ -4479,8 +4622,255 @@
         renderSbc();
       },
       onTargetsChanged: () => { save(); renderSbc(); },
-      onChange: () => renderSbcStatus(),
+      onChange: () => { renderSbcStatus(); renderPtsStatus(); },
     });
+
+    // ---------- SBC por pontos ----------
+    function ptsState() {
+      if (!app.state.pts) app.state.pts = { target: 0, lines: [{ qty: 0, rating: 0, max: 0 }], bought: {}, picks: {} };
+      return app.state.pts;
+    }
+    let ptsRaw = new Map();   // id → carta do Web App (só nesta página)
+    let ptsLines = [];
+    function ptsTrace(msg, level) {
+      const box = el('ptsLog');
+      box.hidden = false;
+      ptsLines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
+      if (ptsLines.length > 80) ptsLines.length = 80;
+      box.innerHTML = ptsLines.join('');
+    }
+
+    function boughtCount(st, r) {
+      return ((st.bought || {})[r] || []).length;
+    }
+
+    function renderPts() {
+      const st = ptsState();
+      if (doc.activeElement !== el('ptsTarget')) el('ptsTarget').value = st.target > 0 ? st.target : '';
+      const box = el('ptsLines');
+      const focused = box.contains(doc.activeElement);
+      if (!focused) {
+        box.innerHTML = st.lines.map((l, i) => '<div class="pts-row" data-pi="' + i + '">' +
+          '<input data-pts="qty" inputmode="numeric" placeholder="qtd" value="' + (l.qty > 0 ? l.qty : '') + '">' +
+          '<span>× ouro</span>' +
+          '<input data-pts="rating" inputmode="numeric" placeholder="nota" value="' + (l.rating > 0 ? l.rating : '') + '">' +
+          '<input data-pts="max" inputmode="numeric" placeholder="pagar até" value="' + (l.max > 0 ? l.max : '') + '">' +
+          '<button type="button" data-pts-del="' + i + '">✕</button></div>').join('');
+      }
+      const total = ptsTotal(st.lines);
+      const lineText = st.lines.filter((l) => l.qty > 0 && l.rating > 0)
+        .map((l) => l.qty + ' × ' + l.rating + ' = ' + fmt(l.qty * ptsScore(l.rating))).join(' · ');
+      el('ptsCheck').innerHTML = !lineText ? 'Preencha quantidade e nota de cada linha.'
+        : lineText + '<br>Total <b>' + fmt(total) + '</b> pontos' + (st.target > 0
+          ? (total >= st.target ? ' ✅ fecha a meta de ' + fmt(st.target) + ' (sobram ' + fmt(total - st.target) + ')'
+            : ' ❌ faltam ' + fmt(st.target - total) + ' para ' + fmt(st.target)) : '') +
+          '<br><span class="hint">Pontos de cartas comuns pela tabela dos guias; especiais e holográficas valem mais.</span>';
+      renderPtsPlan();
+      renderPtsStatus();
+    }
+
+    function renderPtsPlan() {
+      const st = ptsState();
+      const picks = st.picks || {};
+      const rows = [];
+      for (const l of st.lines) {
+        const r = parseInt(l.rating, 10);
+        if (!(r > 0) || !(l.qty > 0)) continue;
+        const p = picks[r];
+        const use = p ? p.items.filter((x) => x.use) : [];
+        const got = boughtCount(st, r);
+        const missing = Math.max(0, l.qty - use.length - got);
+        rows.push('<div class="ed-h">Ouro ' + r + ': precisa ' + l.qty + ' · do clube ' + use.length + (p ? ' (de ' + p.available + ' achadas)' : '') +
+          ' · compradas ' + got + ' · <b>falta comprar ' + missing + '</b>' + (missing && l.max ? ' até ' + fmt(l.max) : '') + '</div>' +
+          (p ? p.items.map((x) => '<label class="pts-pick"><input type="checkbox" data-pts-use="' + r + ':' + x.id + '"' + (x.use ? ' checked' : '') + '> ' +
+            escapeHtml(x.name + ' ' + r) + (x.untradeable ? ' · intransferível' : '') + '</label>').join('') : ''));
+      }
+      el('ptsPlan').innerHTML = rows.join('') || '';
+    }
+
+    function renderPtsStatus() {
+      const box = el('ptsStatus');
+      const st = app.state.pts;
+      const mine = sbcEngine.running && sbcTargets.some((t) => t.ptsRating);
+      if (!st || (!mine && !Object.keys(st.bought || {}).length)) { box.hidden = true; return; }
+      box.hidden = false;
+      const parts = st.lines.filter((l) => l.rating > 0).map((l) => 'ouro ' + l.rating + ': ' + boughtCount(st, l.rating) + ' comprada(s)');
+      box.innerHTML = (mine ? '🟢 Comprando · ' : '') + parts.join(' · ') + (mine && sbcEngine.stats.searches ? ' · ' + sbcEngine.stats.searches + ' busca(s)' : '');
+    }
+
+    function onPtsInput(e) {
+      const st = ptsState();
+      if (e.target.dataset.el === 'ptsTarget') { st.target = parseCoins(e.target.value); save(); renderPts(); return; }
+      const row = e.target.closest('.pts-row');
+      if (row && e.target.dataset.pts) {
+        const l = st.lines[parseInt(row.dataset.pi, 10)];
+        if (!l) return;
+        l[e.target.dataset.pts] = parseCoins(e.target.value);
+        save();
+        renderPts();
+        return;
+      }
+      const use = e.target.dataset.ptsUse;
+      if (use) {
+        const [r, id] = use.split(':').map(Number);
+        const p = (st.picks || {})[r];
+        const x = p && p.items.find((y) => y.id === id);
+        if (x) { x.use = e.target.checked; save(); renderPtsPlan(); }
+      }
+    }
+
+    async function ptsRead() {
+      const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'função indisponível' };
+      if (found.error) return win.alert('Não achei o SBC: ' + found.error + '.');
+      ptsTrace('SBC encontrado. Detalhes (me mande um print se algo não funcionar):', 'info');
+      adapter.sbcDescribe(found).forEach((line) => ptsTrace('  ' + line, 'muted'));
+      const slots = adapter.sbcSlots(found.squad, 200);
+      ptsTrace('Vagas encontradas: ' + slots.length + ' (ocupadas: ' + slots.filter((x) => x.item).length + ').', 'info');
+      // Meta lida da tela, se o desafio informar (ex.: targetScore = 85000).
+      const st = ptsState();
+      const goal = adapter.sbcDescribe(found).map((l) => l.match(/(?:target|goal|required|req)\w*=(\d{4,})/i)).find(Boolean);
+      if (goal && !(st.target > 0)) {
+        st.target = parseInt(goal[1], 10);
+        save();
+        renderPts();
+        ptsTrace('Meta lida do SBC: ' + fmt(st.target) + ' pontos (confira).', 'success');
+      }
+    }
+
+    async function ptsScanClub(btn) {
+      const st = ptsState();
+      const lines = st.lines.filter((l) => l.qty > 0 && l.rating > 0);
+      if (!lines.length) return win.alert('Preencha a solução (quantidade × nota).');
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      modBusy = 'SBC';
+      btn.disabled = true;
+      btn.textContent = 'Procurando…';
+      try {
+        const club = await adapter.clubGoldPlayers(deps.lookup);
+        let items = club.items || [];
+        const un = await readPile('unassigned').catch(() => null);
+        if (un && un.ok) items = items.concat(un.items.filter((it) => it.kind === 'player'));
+        ptsTrace('Li ' + (club.items || []).length + ' jogador(es) ouro do clube' + (un && un.ok ? ' + ' + un.items.length + ' em Não atribuídos' : '') +
+          (club.success ? '.' : ' (não consegui ler o clube: ' + (club.missing ? 'função não encontrada' : club.status) + ').'), club.success ? 'info' : 'warn');
+        const squad = await adapter.activeSquadIds();
+        if (squad.success) ptsTrace('Time ativo: ' + squad.ids.size + ' carta(s) protegida(s).', 'info');
+        else ptsTrace('Não consegui ler o seu time (' + squad.why + '). Confira a lista e desmarque as cartas do time.', 'warn');
+        const specials = items.filter((it) => lines.some((l) => l.rating === it.rating) && it.special === true).length;
+        if (specials) ptsTrace(specials + ' carta(s) especial(is) dessas notas ficaram de fora.', 'muted');
+        if (items.some((it) => it.special == null)) ptsTrace('Algumas cartas não informam a raridade: confira se nenhuma especial ficou marcada.', 'warn');
+        ptsRaw = new Map(items.filter((it) => it.raw).map((it) => [it.id, it.raw]));
+        const plan = planPtsFromClub(lines, items, squad.ids);
+        st.picks = {};
+        plan.picks.forEach((p) => {
+          st.picks[p.rating] = { available: p.available, items: p.items.map((it) => ({ id: it.id, name: it.name, untradeable: !!it.untradeable, use: true })) };
+        });
+        save();
+        renderPts();
+        ptsTrace(plan.need.length ? 'Falta comprar: ' + plan.need.map((n) => n.qty + ' × ouro ' + n.rating).join(', ') + '.' : 'Seu clube cobre a solução inteira! ✅',
+          plan.need.length ? 'warn' : 'success');
+      } finally {
+        modBusy = '';
+        btn.disabled = false;
+        btn.textContent = '🏠 Procurar no meu clube';
+      }
+    }
+
+    function ptsMissing() {
+      const st = ptsState();
+      return st.lines.filter((l) => l.qty > 0 && l.rating > 0).map((l) => {
+        const p = (st.picks || {})[l.rating];
+        const use = p ? p.items.filter((x) => x.use).length : 0;
+        return { rating: l.rating, qty: Math.max(0, l.qty - use - boughtCount(st, l.rating)), max: l.max };
+      }).filter((n) => n.qty > 0);
+    }
+
+    async function ptsBuy() {
+      const st = ptsState();
+      if (engine.running) return win.alert('Pare o Sniper antes.');
+      if (modBusy) return win.alert('Espere o módulo de ' + modBusy + ' terminar.');
+      if (!st.picks || !Object.keys(st.picks).length) {
+        if (!win.confirm('Você ainda não procurou no clube. Comprar tudo, sem usar cartas do clube?')) return;
+      }
+      const need = ptsMissing();
+      if (!need.length) return win.alert('Nada para comprar: o clube e as compras já cobrem a solução.');
+      const bad = need.filter((n) => !(n.max >= 200));
+      if (bad.length) return win.alert('Informe o "pagar até" (mínimo 200) da nota: ' + bad.map((n) => n.rating).join(', ') + '.');
+      const total = need.reduce((n, x) => n + x.qty * x.max, 0);
+      if (!win.confirm('Comprar para o SBC por pontos:\n\n' + need.map((n) => n.qty + ' × ouro ' + n.rating + ' (comum, não especial) até ' + fmt(n.max)).join('\n') +
+        '\n\nTotal: até ' + fmt(total) + ' moedas.' + (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
+      const now = Date.now();
+      sbcTargets = need.map((n) => ptsTarget(n.rating, n.qty, n.max, now));
+      modBusy = 'SBC';
+      ptsTrace('Comprando: ' + need.map((n) => n.qty + ' × ouro ' + n.rating + ' até ' + fmt(n.max)).join(', ') + '. Busca de ' +
+        sbcTargets.map((t) => fmt(t.minPrice) + ' a ' + fmt(t.maxBuy)).join(' / ') + ' e só compra a nota exata.', 'info');
+      renderPtsStatus();
+      const origTrace = sbcTrace;
+      try {
+        sbcTrace = ptsTrace;
+        await sbcEngine.start();
+      } finally {
+        sbcTrace = origTrace;
+        modBusy = '';
+        renderPts();
+      }
+      const left = ptsMissing();
+      ptsTrace(left.length ? 'Faltam: ' + left.map((n) => n.qty + ' × ouro ' + n.rating).join(', ') + '. Toque em Comprar de novo (ou suba o "pagar até").'
+        : 'Tudo comprado! Abra o SBC no Web App e toque em "Montar entrega no SBC".', left.length ? 'warn' : 'success');
+    }
+
+    async function ptsAssemble(btn) {
+      const st = ptsState();
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      const found = adapter.sbcChallenge ? adapter.sbcChallenge() : { error: 'função indisponível' };
+      if (found.error) return win.alert('Não achei o SBC: ' + found.error + '.');
+      modBusy = 'SBC';
+      btn.disabled = true;
+      try {
+        adapter.sbcDescribe(found).forEach((line) => ptsTrace('  ' + line, 'muted'));
+        const raws = [];
+        // Do clube (escolhidas na lista).
+        for (const [r, p] of Object.entries(st.picks || {})) {
+          for (const x of p.items) {
+            if (!x.use) continue;
+            if (ptsRaw.has(x.id)) raws.push({ raw: ptsRaw.get(x.id), name: x.name, rating: Number(r) });
+            else ptsTrace(x.name + ': toque em "Procurar no meu clube" de novo (a página foi recarregada).', 'warn');
+          }
+        }
+        // Compradas (Não atribuídos) → clube.
+        const ids = new Set();
+        Object.values(st.bought || {}).forEach((list) => list.forEach((b) => ids.add(b.itemId)));
+        if (ids.size) {
+          const un = await readPile('unassigned').catch(() => null);
+          if (un && un.ok) {
+            for (const it of un.items.filter((x) => ids.has(x.id) && x.raw)) {
+              const mv = await adapter.moveToClub(it.raw);
+              ptsTrace(it.name + ': ' + (mv.success ? 'mandei para o clube.' : 'não consegui mandar para o clube (erro ' + mv.status + ').'), mv.success ? 'muted' : 'warn');
+              raws.push({ raw: it.raw, name: it.name, rating: it.rating });
+              await sleepMs(400);
+            }
+          }
+        }
+        if (!raws.length) { win.alert('Nenhuma carta para colocar. Procure no clube e/ou compre antes.'); return; }
+        const pts = raws.reduce((n, x) => n + ptsScore(x.rating), 0);
+        const slots = adapter.sbcSlots(found.squad, 200);
+        const free = slots.filter((x) => !x.item);
+        const usable = free.length ? free : slots;
+        ptsTrace(raws.length + ' carta(s) = ' + fmt(pts) + ' pontos (tabela). Vagas livres no SBC: ' + free.length + ' de ' + slots.length + '.', 'info');
+        if (!usable.length) { ptsTrace('❌ Não achei vagas no SBC aberto. Me mande um print deste log.', 'error'); return; }
+        const now = raws.slice(0, usable.length);
+        const later = raws.slice(usable.length);
+        const r = await adapter.sbcPlace(Object.assign({}, found, { maxSlots: slots.length }), now.map((x, i) => ({ index: usable[i].index, raw: x.raw })));
+        if (r.success) {
+          ptsTrace('✅ ' + now.length + ' carta(s) colocada(s) (via ' + r.method + (r.saved ? ', salvo' : '') + '). Confira e envie você mesmo.' +
+            (later.length ? ' Faltaram vagas para ' + later.length + ': depois de enviar, toque em Montar de novo.' : ''), 'success');
+        } else {
+          ptsTrace('❌ Não consegui colocar: ' + r.status + '. Me mande um print deste log; as cartas já estão no clube.', 'error');
+        }
+      } finally {
+        modBusy = '';
+        btn.disabled = false;
+      }
+    }
 
     function renderSbcStatus() {
       const box = el('sbcStatusBox');
@@ -5034,6 +5424,11 @@
         if (a === 'sbcPrices') sbcPrices(act);
         if (a === 'sbcUseNow') sbcUseNow();
         if (a === 'sbcBuy') sbcStartBuying();
+        if (a === 'ptsAddLine') { ptsState().lines.push({ qty: 0, rating: 0, max: 0 }); save(); renderPts(); }
+        if (a === 'ptsRead') ptsRead();
+        if (a === 'ptsClub') ptsScanClub(act);
+        if (a === 'ptsBuy') ptsBuy();
+        if (a === 'ptsAssemble') ptsAssemble(act);
         if (a === 'sbcStop') { if (sbcEngine.running) sbcEngine.stop(); }
         if (a === 'sbcAssemble') sbcAssemble(act);
         if (a === 'sbcResume') sbcResume();
@@ -5107,6 +5502,16 @@
     });
 
     el('sbcList').addEventListener('input', onSbcInput);
+    ['ptsTarget', 'ptsLines', 'ptsPlan'].forEach((k) => el(k).addEventListener('change', onPtsInput));
+    el('ptsLines').addEventListener('click', (e) => {
+      const d = e.target.closest('[data-pts-del]');
+      if (!d) return;
+      const st = ptsState();
+      st.lines.splice(parseInt(d.dataset.ptsDel, 10), 1);
+      if (!st.lines.length) st.lines.push({ qty: 0, rating: 0, max: 0 });
+      save();
+      renderPts();
+    });
     el('sbcList').addEventListener('change', onSbcInput);
 
     panel.addEventListener('input', (e) => {
@@ -5438,6 +5843,70 @@
     };
   }
 
+  // SBC por pontos (Streamlined): pontos de cada carta comum por nota.
+  // Valores divulgados pelos guias do FC 27; a EA pode mudar.
+  const ITEM_SCORES = {
+    75: 90, 76: 100, 77: 120, 78: 140, 79: 160, 80: 180, 81: 280, 82: 340, 83: 410, 84: 830,
+    85: 2100, 86: 4100, 87: 5500, 88: 8300, 89: 11000, 90: 14000, 91: 19000, 92: 20000, 93: 25000,
+    94: 30000, 95: 40000, 96: 55000, 97: 85000, 98: 90000, 99: 100000,
+  };
+  function ptsScore(rating) {
+    const r = parseInt(rating, 10);
+    if (!(r > 0)) return 0;
+    if (r < 65) return 20;
+    if (r < 75) return 35;
+    return ITEM_SCORES[Math.min(99, r)] || 0;
+  }
+
+  function ptsTotal(lines) {
+    return (lines || []).reduce((n, l) => n + (parseInt(l.qty, 10) || 0) * ptsScore(l.rating), 0);
+  }
+
+  // Cartas do clube para cada nota da solução: só ouro comum (não especial),
+  // fora do time; intransferíveis primeiro. Devolve o que usar e o que comprar.
+  function planPtsFromClub(lines, items, exclude) {
+    exclude = exclude || new Set();
+    const used = new Set();
+    const picks = [];
+    const need = [];
+    for (const line of lines) {
+      const r = parseInt(line.rating, 10);
+      const qty = parseInt(line.qty, 10) || 0;
+      const cands = (items || []).filter((it) => it.rating === r && it.kind === 'player' && it.special !== true &&
+        !exclude.has(it.id) && !used.has(it.id))
+        .sort((a, b) => (b.untradeable ? 1 : 0) - (a.untradeable ? 1 : 0));
+      const take = cands.slice(0, qty);
+      take.forEach((it) => used.add(it.id));
+      picks.push({ rating: r, items: take, available: cands.length });
+      if (take.length < qty) need.push({ rating: r, qty: qty - take.length, max: line.max || 0 });
+    }
+    return { picks, need };
+  }
+
+  // Alvo de compra por nota exata (ouro comum), para o comprador do SBC.
+  function ptsTarget(rating, qty, max, now) {
+    const maxBuy = roundDown(max);
+    return {
+      id: 'pts-' + rating,
+      name: 'Pontos: ouro ' + rating,
+      kind: 'player',
+      criteria: { type: 'player', level: 'gold' },
+      labels: {},
+      playStyles: [],
+      minRating: rating,
+      maxRating: rating,
+      noSpecial: true,
+      maxCount: qty,
+      bought: 0,
+      maxBuy,
+      minPrice: roundDown(Math.max(200, maxBuy * 0.7)) < maxBuy ? roundDown(Math.max(200, maxBuy * 0.7)) : 0,
+      sellPrice: 0,
+      enabled: true,
+      ptsRating: rating,
+      createdAt: now || Date.now(),
+    };
+  }
+
   // Posição da vaga do elenco → posição "simples" (RCB → CB, LS → ST...).
   const SLOT_ALIASES = { RCB: 'CB', LCB: 'CB', SW: 'CB', RCM: 'CM', LCM: 'CM', RDM: 'CDM', LDM: 'CDM', RAM: 'CAM', LAM: 'CAM', RS: 'ST', LS: 'ST' };
   function simplePosition(p) {
@@ -5625,7 +6094,7 @@
     learnPsPlusField, applyPsPlus, hasPsPlusFilter, psPlusMismatch, zoneInfo, zoneLabel,
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
-    lowestBin, createMarketCache, clampDock, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    lowestBin, createMarketCache, clampDock, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     nextBidAmount, bidAmountFor, bidProblem, planBids, watchStatus, groupSellable, sellPrices,
   };
 

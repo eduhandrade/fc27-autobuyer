@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.5
+// @version      1.10.6
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.5';
+  const SCRIPT_VERSION = '1.10.6';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -819,11 +819,14 @@
   function bidRejectText(status) {
     if (status === 461) return 'código 461: alguém já tinha lance maior ou a EA não permitiu o lance';
     if (status === 478) return 'código 478: o leilão não existe mais (acabou ou foi comprado)';
-    if (status === 403) return 'código 403: a EA proibiu a ação (bloqueio temporário de lances/compras)';
+    if (status === 403) return 'código 403: a EA proibiu o lance (lista de observação cheia ou bloqueio temporário)';
     if (status === 460) return 'código 460: lance inválido para a EA';
     if (status === 'sem resposta') return 'a EA não respondeu a tempo';
     return status != null && status !== '' ? 'código ' + status : 'sem código da EA';
   }
+
+  // Limite da lista de observação (Transfer Targets) da EA.
+  const WATCH_LIMIT = 50;
 
   // Lances recusados seguidos (sem nenhum aceito) antes de parar.
   const MAX_BID_MISSES_IN_ROW = 6;
@@ -841,8 +844,8 @@
     session: 'Sessão expirada. Faça login de novo no Web App.',
     blocked: 'A EA limitou suas buscas (excesso de requisições / soft ban). Parei. Espere algumas horas.',
     nocoins: 'Moedas insuficientes.',
-    forbidden: 'A EA respondeu "proibido" (403): sua conta está temporariamente sem permissão para isso (lances/compras). Parei. ' +
-      'Confirme com um lance manual no Web App; se também falhar, deixe o mercado de lado por algumas horas (às vezes 24 h).',
+    forbidden: 'A EA respondeu "proibido" (403). Parei. Causa mais comum: lista de observação (Transfer Targets) cheia, com 50 itens: ' +
+      'limpe os leilões perdidos e mova as cartas ganhas. Se não for isso, a conta pode estar temporariamente sem permissão: espere algumas horas.',
   };
 
   function randomBetween(min, max, random) {
@@ -2289,6 +2292,21 @@
     let busterIndex = 0;
     let missesInRow = 0;
     const missCodes = new Map();
+    // Vagas na lista de observação (cada lance ocupa uma). o.watchFree(limpar)
+    // devolve as vagas livres; com limpar=true confere/limpa a lista antes.
+    let free = null;
+    if (o.watchFree && !s.dryRun) {
+      free = await o.watchFree(false);
+      if (free != null) trace('Lista de observação: ' + (WATCH_LIMIT - free) + ' de ' + WATCH_LIMIT + ' itens.', 'muted');
+    }
+    async function ensureSlot(force) {
+      if (!o.watchFree || s.dryRun) return true;
+      if (!force && (free == null || free > 0)) return true;
+      trace('Lista de observação cheia: conferindo, movendo as ganhas e removendo os leilões perdidos…', 'warn');
+      free = await o.watchFree(true);
+      if (free != null && free > 0) { trace('Liberadas ' + free + ' vaga(s) na lista de observação.', 'info'); return true; }
+      return false;
+    }
     while (!stopped()) {
       if (missesInRow >= MAX_BID_MISSES_IN_ROW) {
         const codes = Array.from(missCodes.entries()).map(([c, n]) => n + '× ' + c).join(', ');
@@ -2324,8 +2342,10 @@
       trace('Busca ' + res.searches + ' de ' + maxRounds + ': ' + search.items.length + ' leilão(ões) achados, ' +
         picks.length + ' escolhido(s)' + (skipText ? ' · ignorados: ' + skipText : '') + '.', picks.length ? 'info' : 'muted');
       if (picks.length) await wait(randomBetween(900, 1800, random));
+      let full = false;
       for (const pick of picks) {
         if (stopped()) break;
+        if (!(await ensureSlot(false))) { full = true; break; }
         seen.add(pick.item.tradeId);
         const what = describeItem(pick.item) + ' (termina em ' + Math.max(1, Math.round(pick.item.expires / 60)) + ' min)';
         const now = pick.item.currentBid > 0 ? 'lance atual ' + fmt(pick.item.currentBid) : 'sem lances, inicial ' + fmt(pick.item.startingBid || MIN_PRICE);
@@ -2341,12 +2361,20 @@
         if (bid.success) {
           res.bids++;
           missesInRow = 0;
+          if (free != null) free--;
           res.coinsCommitted += pick.amount;
           log('Lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
           if (o.onBid) o.onBid(pick.item, pick.amount);
           trace('   ✅ lance de ' + fmt(pick.amount) + ' aceito.', 'success');
         } else {
           const kind = classifyStatus(bid.status);
+          // 403 costuma ser a lista de observação cheia: tenta liberar uma vez.
+          if (kind === 'forbidden' && o.watchFree && !res.retried403) {
+            res.retried403 = true;
+            trace('   ❌ a EA recusou o lance (código 403). Pode ser a lista de observação cheia.', 'warn');
+            if (!(await ensureSlot(true))) { full = true; break; }
+            continue;
+          }
           if (FATAL_MESSAGES[kind]) {
             res.stopReason = STOP_REASONS[kind] + ' (código ' + bid.status + ' no lance)';
             log(FATAL_MESSAGES[kind] + ' (código ' + bid.status + ' no lance)', 'error');
@@ -2364,9 +2392,19 @@
         }
         await wait(randomBetween(800, 1600, random));
       }
+      if (full) {
+        res.stopReason = 'lista de observação cheia (' + WATCH_LIMIT + ' itens)';
+        log('Lista de observação cheia (' + WATCH_LIMIT + '). Espere os leilões acabarem ou libere espaço no Web App.', 'error');
+        trace('⛔ Lista de observação cheia (' + WATCH_LIMIT + ' itens) e não consegui liberar vagas: os leilões ainda em andamento ocupam a lista. ' +
+          'Espere alguns terminarem (ou mova as ganhas) e dê lances de novo.', 'error');
+        break;
+      }
       if (missesInRow >= MAX_BID_MISSES_IN_ROW) continue;
       // Entre uma busca e outra: conferir/anunciar os leilões que já acabaram.
-      if (o.between && !stopped()) await o.between();
+      if (o.between && !stopped()) {
+        const f = await o.between();
+        if (typeof f === 'number') free = f;
+      }
       const pause = randomBetween(s.delayMin * 1000, s.delayMax * 1000, random);
       if (!stopped()) trace('Próxima busca em ' + Math.round(pause / 1000) + ' s… (' + (res.bids + res.simulated) + ' lance(s) até agora)', 'muted');
       await wait(pause);
@@ -2446,10 +2484,13 @@
     const sell = o.sell && o.sell.bin > 0 ? o.sell : null;
     const pile = await adapter.pile('watch');
     if (!pile.success) return { error: pile.missing ? 'o Web App não ofereceu a lista de observação' : 'erro ' + pile.status };
-    const counts = { ganhou: 0, ganhando: 0, superado: 0, perdeu: 0, acompanhando: 0, moved: 0, listed: 0, simulated: 0, failed: 0 };
+    const counts = { ganhou: 0, ganhando: 0, superado: 0, perdeu: 0, acompanhando: 0, moved: 0, listed: 0, simulated: 0, failed: 0, cleared: 0, remaining: pile.items.length };
+    // Leilões perdidos (e, se pedido, os superados) saem da lista para liberar vagas.
+    const lost = [];
     for (const it of pile.items) {
       const st = watchStatus(it);
       counts[st]++;
+      if (it.raw && (st === 'perdeu' || (o.clearOutbid && st === 'superado'))) lost.push(it);
       if (st !== 'ganhou') continue;
       recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId, price: it.currentBid, source: 'lance' });
       // Cartas com Shadow/Hunter aplicado não são anunciadas (ficam na lista).
@@ -2470,7 +2511,7 @@
       }
       let moved;
       try { moved = await adapter.moveToTransferList(it.raw); } catch (e) { moved = { success: false, status: e.message }; }
-      if (moved.success) counts.moved++;
+      if (moved.success) { counts.moved++; counts.remaining--; }
       else {
         log('Não consegui mover ' + it.name + ' para a lista de transferências (erro ' + moved.status + ').', 'warn');
         trace('❌ ' + describeItem(it) + ': não consegui mover para a lista (erro ' + moved.status + ').', 'warn');
@@ -2496,6 +2537,18 @@
           if (FATAL_MESSAGES[kind]) { log(FATAL_MESSAGES[kind], 'error'); break; }
         }
         await wait(randomBetween(800, 1500, Math.random));
+      }
+    }
+    if (lost.length && !s.dryRun && o.clearLost !== false && adapter.untarget) {
+      let r;
+      try { r = await adapter.untarget(lost.map((it) => it.raw)); } catch (e) { r = { success: false, status: e.message }; }
+      if (r.success) {
+        counts.cleared = lost.length;
+        counts.remaining -= lost.length;
+        trace('🧹 Removi ' + lost.length + ' leilão(ões) perdido(s) da lista de observação.', 'info');
+      } else {
+        trace('Não consegui remover os leilões perdidos da lista de observação (' + (r.missing ? 'o Web App não ofereceu a função' : 'erro ' + r.status) +
+          '). Use "Clear Expired" no Web App.', 'warn');
       }
     }
     return counts;
@@ -2788,6 +2841,7 @@
           ['services.Item.searchTransferMarket', typeof item.searchTransferMarket === 'function'],
           ['services.Item.bid', typeof item.bid === 'function'],
           ['services.Item.list', typeof item.list === 'function'],
+          ['limpar lista de observação: ' + (methodNames(item).filter((n) => /untarget|unwatch|remove.*watch/i.test(n)).join(', ') || 'função não encontrada'), true],
           ['UTSearchCriteriaDTO', typeof G('UTSearchCriteriaDTO') === 'function'],
           ['saldo de moedas', this.getCoins() != null],
         ];
@@ -3335,6 +3389,24 @@
         if (!svc) return 'services.Item não encontrado';
         return ['transfer', 'unassigned', 'watch'].map((w) => w + ': ' + (findPileMethod(svc, w) || '—')).join(', ') +
           ' | outras: ' + methodNames(svc).filter((n) => /transfer|trade|unassigned|purchas|watch|pile|relist/i.test(n)).slice(0, 15).join(', ');
+      },
+
+      // Tira cartas da lista de observação (como "Clear Expired" do Web App).
+      async untarget(raws) {
+        const svc = G('services').Item;
+        const names = methodNames(svc);
+        const fn = ['untarget', 'removeFromWatchList', 'removeFromWatchlist', 'unwatch'].find((n) => names.includes(n)) ||
+          names.find((n) => /untarget|unwatch|remove.*watch/i.test(n));
+        if (!fn) return { success: false, status: 0, missing: true };
+        let r;
+        try { r = result(await observe(svc[fn](raws))); } catch (e) { r = { success: false, status: e.message }; }
+        if (r.success || raws.length === 1) return r;
+        // Alguns Web Apps só aceitam uma carta por vez.
+        let ok = 0;
+        for (const raw of raws) {
+          try { if ((await observe(svc[fn](raw))).success) ok++; } catch (e) { /* ignora */ }
+        }
+        return { success: ok === raws.length, status: ok + ' de ' + raws.length };
       },
 
       async moveToTransferList(raw) {
@@ -4626,12 +4698,22 @@
           if (!ended.length || Date.now() - lastCollect < 45000) return;
           lastCollect = Date.now();
           trace(ended.length + ' leilão(ões) seu(s) terminou(aram): conferindo' + (bidSellPlan() ? ' e anunciando as ganhas' : '') + '…', 'info');
-          await runCollect(trace);
+          const c = await runCollect(trace);
           sess.pending = (sess.pending || []).filter((x) => !ended.includes(x));
           app.state.bidSession = sess;
           save();
+          return c && !c.error ? WATCH_LIMIT - c.remaining : undefined;
         };
-        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, isStopped: () => modStop });
+        // Vagas livres na lista de observação; limpar=true confere e remove perdidos/superados.
+        const watchFree = async (clean) => {
+          if (clean) {
+            const c = await runCollect(trace, { clearOutbid: true });
+            return c && !c.error ? WATCH_LIMIT - c.remaining : null;
+          }
+          const p = await adapter.pile('watch');
+          return p.success ? WATCH_LIMIT - p.items.length : null;
+        };
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, watchFree, isStopped: () => modStop });
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
@@ -4687,17 +4769,18 @@
     }
 
     // Confere a lista de observação; usado pelo botão e ao fim dos lances.
-    async function runCollect(trace) {
+    async function runCollect(trace, extra) {
       el('bidResult').hidden = false;
       el('bidResult').textContent = 'Conferindo lista de observação…';
       const sell = bidSellPlan();
       if (sell && sell.onlyIds && !sell.onlyIds.size) trace('Nenhum lance desta sessão para anunciar (desmarque "só desta sessão" para anunciar todas as ganhas).', 'warn');
-      const r = await collectWonBids({ adapter, ledger: ledger(), log, trace, settings: app.state.settings, sell });
+      const r = await collectWonBids(Object.assign({ adapter, ledger: ledger(), log, trace, settings: app.state.settings, sell }, extra));
       save();
       el('bidResult').innerHTML = r.error ? 'Não consegui: ' + escapeHtml(r.error)
         : 'Ganhou <b>' + r.ganhou + '</b> (movidas para a lista: ' + r.moved + ')' +
           (sell ? ' · anunciadas: <b>' + (r.listed || r.simulated) + '</b>' + (r.simulated ? ' (simulação)' : '') + (r.failed ? ', ' + r.failed + ' com erro' : '') : '') +
-          ' · ganhando ' + r.ganhando + ' · superado ' + r.superado + ' · perdeu ' + r.perdeu + '.';
+          ' · ganhando ' + r.ganhando + ' · superado ' + r.superado + ' · perdeu ' + r.perdeu +
+          (r.cleared ? ' (' + r.cleared + ' removido(s) da lista)' : '') + ' · lista de observação: ' + r.remaining + '/' + WATCH_LIMIT + '.';
       if (!r.error) trace('Conferido: ganhou ' + r.ganhou + ', anunciadas ' + (r.listed || r.simulated) + '.', 'info');
       return r;
     }

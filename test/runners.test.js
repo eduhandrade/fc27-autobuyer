@@ -127,3 +127,49 @@ test('lances em massa: código 403 para na hora', async () => {
   assert.equal(ad.calls.bids.length, 1);
   assert.match(r.stopReason, /^a EA bloqueou a ação \(código 403 no lance\)$/);
 });
+
+test('lances em massa: lista de observação cheia libera vagas ou para', async () => {
+  const items = [1, 2, 3].map(card);
+  const ad = fakeAdapter([{ success: true, status: 200, items }]);
+  const asks = [];
+  let freeNow = 1;
+  const watchFree = async (clean) => { asks.push(clean); return clean ? 0 : freeNow; };
+  const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 5 }, settings: S, log: () => {}, wait: noWait, watchFree });
+  assert.equal(ad.calls.bids.length, 1);
+  assert.deepEqual(asks, [false, true]);
+  assert.match(r.stopReason, /lista de observação cheia/);
+});
+
+test('lances em massa: 403 confere a lista e continua se liberou vaga', async () => {
+  let n = 0;
+  const ad = fakeAdapter([{ success: true, status: 200, items: [card(1), card(2)] }], () => (n++ === 0 ? { success: false, status: 403 } : { success: true, status: 200 }));
+  const asks = [];
+  const watchFree = async (clean) => { asks.push(clean); return clean ? 10 : 0 + 5; };
+  const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 1 }, settings: S, log: () => {}, wait: noWait, watchFree });
+  assert.deepEqual(asks, [false, true]);
+  assert.equal(r.bids, 1);
+  assert.equal(r.stopReason, 'número de lances atingido');
+});
+
+test('confere lances: remove da lista de observação os leilões perdidos', async () => {
+  const removed = [];
+  const ad = {
+    async pile() {
+      return { success: true, items: [
+        { id: 7, name: 'Ganha', tradeState: 'closed', bidState: 'highest', currentBid: 1500, raw: { id: 7 } },
+        { id: 8, name: 'Perdida', tradeState: 'closed', bidState: 'outbid', currentBid: 3000, raw: { id: 8 } },
+        { id: 9, name: 'Superada', tradeState: 'active', bidState: 'outbid', currentBid: 900, raw: { id: 9 } },
+      ] };
+    },
+    async moveToTransferList() { return { success: true }; },
+    async untarget(raws) { removed.push(...raws.map((x) => x.id)); return { success: true }; },
+  };
+  const r = await ab.collectWonBids({ adapter: ad, ledger: {}, log: () => {}, settings: {}, wait: noWait });
+  assert.deepEqual(removed, [8]);
+  assert.equal(r.cleared, 1);
+  assert.equal(r.remaining, 1);
+  removed.length = 0;
+  const r2 = await ab.collectWonBids({ adapter: ad, ledger: {}, log: () => {}, settings: {}, wait: noWait, clearOutbid: true });
+  assert.deepEqual(removed, [8, 9]);
+  assert.equal(r2.remaining, 0);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.6
+// @version      1.10.7
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.6';
+  const SCRIPT_VERSION = '1.10.7';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2490,7 +2490,9 @@
     for (const it of pile.items) {
       const st = watchStatus(it);
       counts[st]++;
-      if (it.raw && (st === 'perdeu' || (o.clearOutbid && st === 'superado'))) lost.push(it);
+      // botIds: lances dados pelo bot (superados nesses nunca são cobertos).
+      const outbidOk = st === 'superado' && (o.clearOutbid || (o.botIds && o.botIds.has(ledgerKey(it.id))));
+      if (it.raw && (st === 'perdeu' || outbidOk)) lost.push(it);
       if (st !== 'ganhou') continue;
       recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId, price: it.currentBid, source: 'lance' });
       // Cartas com Shadow/Hunter aplicado não são anunciadas (ficam na lista).
@@ -2545,7 +2547,9 @@
       if (r.success) {
         counts.cleared = lost.length;
         counts.remaining -= lost.length;
-        trace('🧹 Removi ' + lost.length + ' leilão(ões) perdido(s) da lista de observação.', 'info');
+        const outbid = lost.filter((it) => watchStatus(it) === 'superado').length;
+        trace('🧹 Removi ' + lost.length + ' da lista de observação (' + (lost.length - outbid) + ' perdido(s)' +
+          (outbid ? ', ' + outbid + ' superado(s) em lances do bot' : '') + ').', 'info');
       } else {
         trace('Não consegui remover os leilões perdidos da lista de observação (' + (r.missing ? 'o Web App não ofereceu a função' : 'erro ' + r.status) +
           '). Use "Clear Expired" no Web App.', 'warn');
@@ -4774,7 +4778,8 @@
       el('bidResult').textContent = 'Conferindo lista de observação…';
       const sell = bidSellPlan();
       if (sell && sell.onlyIds && !sell.onlyIds.size) trace('Nenhum lance desta sessão para anunciar (desmarque "só desta sessão" para anunciar todas as ganhas).', 'warn');
-      const r = await collectWonBids(Object.assign({ adapter, ledger: ledger(), log, trace, settings: app.state.settings, sell }, extra));
+      const botIds = new Set(Object.keys(app.state.bids || {}));
+      const r = await collectWonBids(Object.assign({ adapter, ledger: ledger(), log, trace, settings: app.state.settings, sell, botIds }, extra));
       save();
       el('bidResult').innerHTML = r.error ? 'Não consegui: ' + escapeHtml(r.error)
         : 'Ganhou <b>' + r.ganhou + '</b> (movidas para a lista: ' + r.moved + ')' +

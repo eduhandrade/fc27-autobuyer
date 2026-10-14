@@ -173,3 +173,19 @@ test('confere lances: remove da lista de observação os leilões perdidos', asy
   assert.deepEqual(removed, [8, 9]);
   assert.equal(r2.remaining, 0);
 });
+
+test('confere lances: remove superados só dos lances do bot', async () => {
+  const removed = [];
+  const ad = {
+    async pile() {
+      return { success: true, items: [
+        { id: 9, name: 'Superada bot', tradeState: 'active', bidState: 'outbid', currentBid: 900, raw: { id: 9 } },
+        { id: 10, name: 'Superada manual', tradeState: 'active', bidState: 'outbid', currentBid: 900, raw: { id: 10 } },
+      ] };
+    },
+    async untarget(raws) { removed.push(...raws.map((x) => x.id)); return { success: true }; },
+  };
+  const r = await ab.collectWonBids({ adapter: ad, ledger: {}, log: () => {}, settings: {}, wait: noWait, botIds: new Set(['i9']) });
+  assert.deepEqual(removed, [9]);
+  assert.equal(r.remaining, 1);
+});

@@ -120,3 +120,10 @@ test('lances em massa: um lance aceito zera a contagem de recusados', async () =
   assert.equal(r.missed, 7);
   assert.equal(r.stopReason, 'limite de buscas atingido');
 });
+
+test('lances em massa: código 403 para na hora', async () => {
+  const ad = fakeAdapter([{ success: true, status: 200, items: [card(1), card(2)] }], () => ({ success: false, status: 403 }));
+  const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 5 }, settings: S, log: () => {}, wait: noWait });
+  assert.equal(ad.calls.bids.length, 1);
+  assert.match(r.stopReason, /^a EA bloqueou a ação \(código 403 no lance\)$/);
+});

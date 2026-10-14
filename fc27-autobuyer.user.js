@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.4
+// @version      1.10.5
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.4';
+  const SCRIPT_VERSION = '1.10.5';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -808,6 +808,7 @@
   function classifyStatus(status) {
     if (status === 458) return 'captcha';
     if (status === 401) return 'session';
+    if (status === 403) return 'forbidden';
     if (status === 426 || status === 429 || status === 512 || status === 521) return 'blocked';
     if (status === 460 || status === 461 || status === 478) return 'missed';
     if (status === 470) return 'nocoins';
@@ -818,6 +819,7 @@
   function bidRejectText(status) {
     if (status === 461) return 'código 461: alguém já tinha lance maior ou a EA não permitiu o lance';
     if (status === 478) return 'código 478: o leilão não existe mais (acabou ou foi comprado)';
+    if (status === 403) return 'código 403: a EA proibiu a ação (bloqueio temporário de lances/compras)';
     if (status === 460) return 'código 460: lance inválido para a EA';
     if (status === 'sem resposta') return 'a EA não respondeu a tempo';
     return status != null && status !== '' ? 'código ' + status : 'sem código da EA';
@@ -830,6 +832,7 @@
     captcha: 'captcha da EA',
     session: 'sessão expirada',
     blocked: 'limitado pela EA',
+    forbidden: 'a EA bloqueou a ação',
     nocoins: 'moedas insuficientes',
   };
 
@@ -838,6 +841,8 @@
     session: 'Sessão expirada. Faça login de novo no Web App.',
     blocked: 'A EA limitou suas buscas (excesso de requisições / soft ban). Parei. Espere algumas horas.',
     nocoins: 'Moedas insuficientes.',
+    forbidden: 'A EA respondeu "proibido" (403): sua conta está temporariamente sem permissão para isso (lances/compras). Parei. ' +
+      'Confirme com um lance manual no Web App; se também falhar, deixe o mercado de lado por algumas horas (às vezes 24 h).',
   };
 
   function randomBetween(min, max, random) {

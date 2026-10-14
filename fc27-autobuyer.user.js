@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.3
+// @version      1.10.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.3';
+  const SCRIPT_VERSION = '1.10.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -813,6 +813,18 @@
     if (status === 470) return 'nocoins';
     return 'unknown';
   }
+
+  // Por que a EA recusou um lance (texto curto para o log).
+  function bidRejectText(status) {
+    if (status === 461) return 'código 461: alguém já tinha lance maior ou a EA não permitiu o lance';
+    if (status === 478) return 'código 478: o leilão não existe mais (acabou ou foi comprado)';
+    if (status === 460) return 'código 460: lance inválido para a EA';
+    if (status === 'sem resposta') return 'a EA não respondeu a tempo';
+    return status != null && status !== '' ? 'código ' + status : 'sem código da EA';
+  }
+
+  // Lances recusados seguidos (sem nenhum aceito) antes de parar.
+  const MAX_BID_MISSES_IN_ROW = 6;
 
   const STOP_REASONS = {
     captcha: 'captcha da EA',
@@ -2270,7 +2282,17 @@
     delete criteria.minBuy;
     delete criteria.maxBuy;
     let busterIndex = 0;
+    let missesInRow = 0;
+    const missCodes = new Map();
     while (!stopped()) {
+      if (missesInRow >= MAX_BID_MISSES_IN_ROW) {
+        const codes = Array.from(missCodes.entries()).map(([c, n]) => n + '× ' + c).join(', ');
+        res.stopReason = missesInRow + ' lances recusados seguidos (' + codes + ')';
+        log(res.stopReason + '. A EA pode estar limitando seus lances: tente um lance manual no Web App; se der erro, espere 1–2 horas.', 'error');
+        trace('⛔ ' + missesInRow + ' lances recusados seguidos (' + codes + '). Parei para não piorar um possível limite da EA. ' +
+          'Teste um lance manual no Web App: se também for recusado, espere 1–2 horas. Se o lance manual funcionar, o mercado está disputado: suba o lance máximo ou escolha outra carta.', 'error');
+        break;
+      }
       if (plan.maxBids > 0 && res.bids + res.simulated >= plan.maxBids) { res.stopReason = 'número de lances atingido'; break; }
       if (res.searches >= maxRounds) { res.stopReason = 'limite de buscas atingido'; break; }
       const search = await adapter.search(Object.assign({}, criteria, {
@@ -2313,6 +2335,7 @@
         const bid = await adapter.buy(pick.item.raw, pick.amount);
         if (bid.success) {
           res.bids++;
+          missesInRow = 0;
           res.coinsCommitted += pick.amount;
           log('Lance de ' + fmt(pick.amount) + ' em ' + what + '.', 'success');
           if (o.onBid) o.onBid(pick.item, pick.amount);
@@ -2327,11 +2350,16 @@
             return res;
           }
           res.missed++;
-          log('Lance não aceito em ' + describeItem(pick.item) + ' (alguém deu lance antes ou o leilão acabou).', 'warn');
-          trace('   ❌ não aceito (alguém deu lance antes ou o leilão acabou).', 'warn');
+          missesInRow++;
+          const code = bid.status != null && bid.status !== '' ? String(bid.status) : 'sem código';
+          missCodes.set(code, (missCodes.get(code) || 0) + 1);
+          log('Lance não aceito em ' + describeItem(pick.item) + ' (' + bidRejectText(bid.status) + ').', 'warn');
+          trace('   ❌ não aceito (' + bidRejectText(bid.status) + ').', 'warn');
+          if (missesInRow >= MAX_BID_MISSES_IN_ROW) break;
         }
         await wait(randomBetween(800, 1600, random));
       }
+      if (missesInRow >= MAX_BID_MISSES_IN_ROW) continue;
       // Entre uma busca e outra: conferir/anunciar os leilões que já acabaram.
       if (o.between && !stopped()) await o.between();
       const pause = randomBetween(s.delayMin * 1000, s.delayMax * 1000, random);

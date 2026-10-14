@@ -99,3 +99,24 @@ test('venda em massa: anuncia só a quantidade escolhida e atualiza o registro',
   assert.equal(sim.simulated, 3);
   assert.equal(listed.length, 2);
 });
+
+test('lances em massa: mostra o código e para após muitos lances recusados seguidos', async () => {
+  const items = [1, 2, 3, 4, 5, 6, 7, 8].map(card);
+  const ad = fakeAdapter([{ success: true, status: 200, items }], () => ({ success: false, status: 461 }));
+  const traces = [];
+  const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 20 }, settings: S, log: () => {}, trace: (m) => traces.push(m), wait: noWait });
+  assert.equal(ad.calls.bids.length, 6);
+  assert.equal(r.missed, 6);
+  assert.match(r.stopReason, /^6 lances recusados seguidos \(6× 461\)$/);
+  assert.ok(traces.some((m) => /código 461/.test(m)));
+});
+
+test('lances em massa: um lance aceito zera a contagem de recusados', async () => {
+  const items = [1, 2, 3, 4, 5, 6, 7, 8].map(card);
+  const ad = fakeAdapter([{ success: true, status: 200, items }, { success: true, status: 200, items: [] }],
+    (raw) => (raw.tradeId === 4 ? { success: true, status: 200 } : { success: false, status: 478 }));
+  const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 20, maxSearches: 2 }, settings: S, log: () => {}, wait: noWait });
+  assert.equal(r.bids, 1);
+  assert.equal(r.missed, 7);
+  assert.equal(r.stopReason, 'limite de buscas atingido');
+});

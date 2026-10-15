@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.7
+// @version      1.10.8
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -21,7 +21,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.7';
+  const SCRIPT_VERSION = '1.10.8';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -827,6 +827,11 @@
 
   // Limite da lista de observação (Transfer Targets) da EA.
   const WATCH_LIMIT = 50;
+
+  // Limpeza leve da lista de observação durante os lances: a cada N buscas,
+  // ou sempre que restarem poucas vagas.
+  const WATCH_CLEAN_EVERY = 3;
+  const WATCH_LOW = 8;
 
   // Lances recusados seguidos (sem nenhum aceito) antes de parar.
   const MAX_BID_MISSES_IN_ROW = 6;
@@ -2401,8 +2406,16 @@
       }
       if (missesInRow >= MAX_BID_MISSES_IN_ROW) continue;
       // Entre uma busca e outra: conferir/anunciar os leilões que já acabaram.
+      let collected = false;
       if (o.between && !stopped()) {
         const f = await o.between();
+        if (typeof f === 'number') { free = f; collected = true; }
+      }
+      // Limpeza leve da lista de observação (perdidos e superados do bot) a
+      // cada poucas buscas, ou antes se estiver quase cheia.
+      if (o.cleanWatch && !s.dryRun && !collected && !stopped() &&
+        (res.searches % WATCH_CLEAN_EVERY === 0 || (free != null && free <= WATCH_LOW))) {
+        const f = await o.cleanWatch();
         if (typeof f === 'number') free = f;
       }
       const pause = randomBetween(s.delayMin * 1000, s.delayMax * 1000, random);
@@ -2556,6 +2569,35 @@
       }
     }
     return counts;
+  }
+
+  // Limpeza leve da lista de observação: remove os leilões perdidos e os
+  // superados em lances do bot (o.botIds), sem mover nem anunciar nada.
+  async function cleanWatchList(o) {
+    const { adapter } = o;
+    const trace = o.trace || (() => {});
+    const pile = await adapter.pile('watch');
+    if (!pile.success) return { error: pile.missing ? 'o Web App não ofereceu a lista de observação' : 'erro ' + pile.status };
+    const out = { remaining: pile.items.length, cleared: 0, lost: 0, outbid: 0 };
+    const drop = pile.items.filter((it) => {
+      if (!it.raw) return false;
+      const st = watchStatus(it);
+      return st === 'perdeu' || (st === 'superado' && o.botIds && o.botIds.has(ledgerKey(it.id)));
+    });
+    if (!drop.length || !adapter.untarget) return out;
+    let r;
+    try { r = await adapter.untarget(drop.map((it) => it.raw)); } catch (e) { r = { success: false, status: e.message }; }
+    if (!r.success) {
+      out.error = r.missing ? 'o Web App não ofereceu a função de remover da lista' : 'erro ' + r.status;
+      return out;
+    }
+    out.cleared = drop.length;
+    out.outbid = drop.filter((it) => watchStatus(it) === 'superado').length;
+    out.lost = drop.length - out.outbid;
+    out.remaining -= drop.length;
+    trace('🧹 Lista de observação: removi ' + out.lost + ' perdido(s)' + (out.outbid ? ' e ' + out.outbid + ' superado(s)' : '') +
+      ' · agora ' + out.remaining + '/' + WATCH_LIMIT + '.', 'muted');
+    return out;
   }
 
   // Estilos de química que fazem a carta valer mais: não revender automático.
@@ -4717,7 +4759,16 @@
           const p = await adapter.pile('watch');
           return p.success ? WATCH_LIMIT - p.items.length : null;
         };
-        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, watchFree, isStopped: () => modStop });
+        let cleanWarned = false;
+        const cleanWatch = async () => {
+          const c = await cleanWatchList({ adapter, trace, botIds: new Set(Object.keys(app.state.bids || {})) });
+          if (c.error && !cleanWarned) {
+            cleanWarned = true;
+            trace('Não consegui limpar a lista de observação (' + c.error + '). Use "Clear Expired" no Web App ou mande o Diagnóstico.', 'warn');
+          }
+          return c.remaining != null ? WATCH_LIMIT - c.remaining : undefined;
+        };
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, watchFree, cleanWatch, isStopped: () => modStop });
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
@@ -6779,7 +6830,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, planBids, watchStatus, groupSellable, sellPrices,
+    nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

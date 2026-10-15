@@ -189,3 +189,33 @@ test('confere lances: remove superados só dos lances do bot', async () => {
   assert.deepEqual(removed, [9]);
   assert.equal(r.remaining, 1);
 });
+
+test('lances em massa: limpa a lista de observação a cada 3 buscas', async () => {
+  const ad = fakeAdapter([{ success: true, status: 200, items: [] }]);
+  let cleans = 0;
+  const r = await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 5, maxSearches: 7 }, settings: S, log: () => {}, wait: noWait,
+    cleanWatch: async () => { cleans++; return 40; } });
+  assert.equal(r.searches, 7);
+  assert.equal(cleans, 2);
+});
+
+test('limpeza leve: remove perdidos e superados do bot, sem mover nada', async () => {
+  const removed = [];
+  const ad = {
+    async pile() {
+      return { success: true, items: [
+        { id: 7, tradeState: 'closed', bidState: 'highest', raw: { id: 7 } },
+        { id: 8, tradeState: 'closed', bidState: 'outbid', raw: { id: 8 } },
+        { id: 9, tradeState: 'active', bidState: 'outbid', raw: { id: 9 } },
+        { id: 10, tradeState: 'active', bidState: 'outbid', raw: { id: 10 } },
+      ] };
+    },
+    async moveToTransferList() { throw new Error('não deveria mover'); },
+    async untarget(raws) { removed.push(...raws.map((x) => x.id)); return { success: true }; },
+  };
+  const r = await ab.cleanWatchList({ adapter: ad, botIds: new Set(['i9']) });
+  assert.deepEqual(removed, [8, 9]);
+  assert.equal(r.remaining, 2);
+  assert.equal(r.lost, 1);
+  assert.equal(r.outbid, 1);
+});

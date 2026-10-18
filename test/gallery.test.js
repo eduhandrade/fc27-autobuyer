@@ -83,3 +83,9 @@ test('motor: chama e espera o afterSearch a cada busca', async () => {
   await bot.start();
   assert.deepEqual(seen, ['gal-7', 'gal-7', 'gal-7', 'gal-7']);
 });
+
+test('galeria: separa nome e nota do texto "Nome - 68 - Rare"', () => {
+  assert.deepEqual(ab.splitCardLabel('McKenna - 68 - Rare'), { name: 'McKenna', rating: 68 });
+  assert.deepEqual(ab.splitCardLabel('Lee Geum Min - 70 - Rare'), { name: 'Lee Geum Min', rating: 70 });
+  assert.deepEqual(ab.splitCardLabel('Fini'), { name: 'Fini', rating: 0 });
+});

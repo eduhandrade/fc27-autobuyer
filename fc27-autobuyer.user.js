@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.1
+// @version      1.11.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.1';
+  const SCRIPT_VERSION = '1.11.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -3975,6 +3975,8 @@
           <div data-el="galList"></div>
           <div data-el="galActions" hidden>
             <p class="hint" data-el="galTotal"></p>
+            <button class="full price" data-act="galPrices">💲 Preço atual no mercado (marcadas)</button>
+            <button class="full" data-act="galUseNow">Usar o preço do mercado como "pagar até"</button>
             <div class="ed-actions">
               <button class="go" data-act="galBuy">🛒 Comprar e anunciar</button>
               <button class="no" data-act="galStop">Parar</button>
@@ -5170,6 +5172,7 @@
         if (e.fatal) galEngine.stop(e.stop);
         return;
       }
+      deps.market.set(t.definitionId, { price: r.price || 0 });
       if (p) { p.marketNow = r.price || 0; p.marketAt = Date.now(); save(); renderGal(); }
       galTrace(label + ': ' + n + ' buscas sem achar por até ' + fmt(t.maxBuy) + '. ' +
         (r.price ? 'Menor preço no mercado agora: ' + fmt(r.price) + ' (revenda de empate: ' + fmt(breakEvenPrice(r.price)) + '). Use o + para subir o "pagar até".'
@@ -5182,6 +5185,8 @@
       if (r.sbc.kind !== 'gallery') return win.alert('Esse código não é de um conjunto da Galeria (FUT.GG). Para SBC, use a aba 🧩 SBC.');
       if (galEngine.running) return win.alert('Pare as compras atuais antes de importar outro conjunto.');
       r.sbc.players.forEach((p) => {
+        const lab = splitCardLabel(p.name);
+        if (lab.rating) { p.name = lab.name; if (!p.rating) p.rating = lab.rating; }
         p.buy = !p.owned;
         p.max = galleryMaxBuy(p.price);
         p.bought = false;
@@ -5216,7 +5221,9 @@
 
     function galRowHtml(p, i) {
       const sell = p.max > 0 ? breakEvenPrice(p.max) : 0;
-      const market = p.marketNow > 0 && !p.bought ? 'mercado agora ' + fmt(p.marketNow) : '';
+      const m = deps.market && deps.market.get(p.definitionId);
+      const market = p.bought ? '' : m && m.state === 'checking' ? 'mercado agora …' : m && m.price > 0 ? 'mercado agora ' + fmt(m.price)
+        : m ? 'mercado: sem anúncio' : p.marketNow > 0 ? 'mercado ' + fmt(p.marketNow) + ' às ' + new Date(p.marketAt).toLocaleTimeString('pt-BR').slice(0, 5) : '';
       const info = [p.price ? 'FUT.GG ' + fmt(p.price) : 'FUT.GG sem preço', market, sell && !p.bought ? 'revende por ' + fmt(sell) + ' se pagar ' + fmt(p.max) : '', galStatusOf(p)]
         .filter(Boolean).join(' · ');
       const off = p.bought ? ' disabled' : '';
@@ -5292,6 +5299,45 @@
       else renderGalTotal();
     }
 
+    function galPrices(btn) {
+      if (modBusy === 'preços') { modStop = true; log('Parando a consulta de preços…', 'warn'); return; }
+      const g = app.state.gallery;
+      if (!g) return;
+      if (galEngine.running) return win.alert('Pare as compras antes de consultar os preços (as duas coisas juntas chamam a atenção da EA).');
+      const cards = g.players.filter((p) => p.buy && !p.bought).map((p) => ({ name: p.name, definitionId: p.definitionId, rating: p.rating }));
+      if (!cards.length) return win.alert('Marque pelo menos uma carta que ainda falta comprar.');
+      cards.forEach((c) => { const m = deps.market.get(c.definitionId); if (m && m.state !== 'checking') deps.market.delete(c.definitionId); });
+      const label = btn.textContent;
+      checkPrices(cards, {
+        quiet: true,
+        onUpdate: renderGal,
+        progress: (t) => { btn.textContent = t ? 'Consultando ' + t + ' (toque para parar)' : label; },
+      }).then(() => {
+        cards.forEach((c) => {
+          const m = deps.market.get(c.definitionId);
+          const p = g.players.find((x) => x.definitionId === c.definitionId);
+          if (p && m && m.state !== 'checking') { p.marketNow = m.price || 0; p.marketAt = Date.now(); }
+        });
+        save();
+        renderGal();
+      });
+    }
+
+    function galUseNow() {
+      const g = app.state.gallery;
+      if (!g) return;
+      let n = 0;
+      g.players.filter((p) => p.buy && !p.bought).forEach((p) => {
+        const m = deps.market.get(p.definitionId);
+        const price = m && m.price > 0 ? m.price : 0;
+        if (price) { p.max = price; n++; }
+      });
+      if (!n) return win.alert('Consulte o preço atual primeiro (💲 Preço atual no mercado).');
+      save();
+      renderGal();
+      log('Galeria: "pagar até" de ' + n + ' carta(s) = preço atual do mercado. A revenda continua no empate.', 'success');
+    }
+
     async function galStartBuying() {
       const g = app.state.gallery;
       if (!g) return;
@@ -5325,7 +5371,12 @@
       }
       const left = g.players.filter((p) => p.buy && !p.bought);
       if (!left.length) galTrace('Tudo comprado e anunciado! Avalie o conjunto da Galeria no console.', 'success');
-      else galTrace('Faltam ' + left.length + ': ' + left.map((p) => p.name).join(', ') + '. Toque em Comprar de novo para continuar (ou suba o "pagar até").', 'warn');
+      else {
+        const tries = (p) => galTries.get('gal-' + p.definitionId) || 0;
+        galTrace('Faltam ' + left.length + ': ' + left.map((p) => p.name + ' (' + tries(p) + ' busca(s)' +
+          (p.marketNow > 0 ? ', mercado ' + fmt(p.marketNow) : '') + ')').join(', ') +
+          '. Use 💲 Preço atual no mercado para ver quanto estão pedindo, ajuste com + e toque em Comprar de novo.', 'warn');
+      }
     }
 
     // ---------- SBC por pontos ----------
@@ -6273,6 +6324,8 @@
         if (a === 'galPaste') pasteGal();
         if (a === 'galImport') importGal(el('galCode').value);
         if (a === 'galBuy') galStartBuying();
+        if (a === 'galPrices') galPrices(act);
+        if (a === 'galUseNow') galUseNow();
         if (a === 'galStop') { if (galEngine.running) galEngine.stop('parado por você'); }
         if (a === 'galClear') {
           if (galEngine.running) return win.alert('Pare as compras antes de limpar.');
@@ -6989,6 +7042,12 @@
     return { rating, price, name: name || slugName || '' };
   }
 
+  // "McKenna - 68 - Rare" (texto alternativo da imagem) → nome e nota.
+  function splitCardLabel(label) {
+    const m = /^(.*?)\s*[-–]\s*(\d{2})(?:\s*[-–].*)?$/.exec(String(label || '').trim());
+    return m ? { name: m[1].trim(), rating: +m[2] } : { name: String(label || '').trim(), rating: 0 };
+  }
+
   function isGreenColor(c) {
     const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/.exec(String(c || ''));
     if (!m) return false;
@@ -7045,7 +7104,8 @@
       const slugName = slug ? slug[1].split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : '';
       const alts = Array.from(t.tile.querySelectorAll('img[alt]')).map((i) => i.getAttribute('alt')).filter((a) => a && !/coin|gem|score|flag|club|league|nation|logo/i.test(a));
       const r = readGalleryTexts(leaves(t.tile), slugName);
-      players.push({ definitionId: id, name: r.name || alts[0] || '', rating: r.rating, price: r.price, owned: owned(t.tile) });
+      const alt = splitCardLabel(alts[0] || '');
+      players.push({ definitionId: id, name: r.name || alt.name, rating: r.rating || alt.rating, price: r.price, owned: owned(t.tile) });
     }
     const h1 = doc.querySelector('h1');
     const fromPath = (win.location.pathname.split('/').filter(Boolean).pop() || 'Galeria').replace(/-/g, ' ');
@@ -7277,7 +7337,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    breakEvenPrice, galleryMaxBuy, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
+    breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
     nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 

@@ -89,3 +89,11 @@ test('galeria: separa nome e nota do texto "Nome - 68 - Rare"', () => {
   assert.deepEqual(ab.splitCardLabel('Lee Geum Min - 70 - Rare'), { name: 'Lee Geum Min', rating: 70 });
   assert.deepEqual(ab.splitCardLabel('Fini'), { name: 'Fini', rating: 0 });
 });
+
+test('galeria: não confunde a pontuação (◆) com a nota da carta', () => {
+  const r = ab.readGalleryTexts(['Alfonso Herrero', 'DIV', 'HAN', '90', '2.3K'], '');
+  assert.equal(r.rating, 0);
+  assert.equal(r.price, 2300);
+  assert.equal(ab.readGalleryTexts(['75', 'GK', 'Alfonso Herrero', '90', '2.3K'], '').rating, 75);
+  assert.ok(!ab.isGreenColor('rgb(80, 220, 180)'), 'verde-água do diamante não conta como marcada');
+});

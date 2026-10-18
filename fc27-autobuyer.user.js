@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.2
+// @version      1.11.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.2';
+  const SCRIPT_VERSION = '1.11.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -7021,15 +7021,20 @@
   function readGalleryTexts(texts, slugName) {
     const words = [];
     texts.forEach((t) => String(t).split(/\s+/).forEach((w) => { if (w) words.push(w); }));
-    let rating = 0;
-    for (const w of words) {
-      if (/^\d{2}$/.test(w) && +w >= 40 && +w <= 99) { rating = +w; break; }
-    }
     let price = 0;
-    for (const w of words) {
-      if (!/^\d+(?:[.,]\d+)*[KkMm]?$/.test(w)) continue;
+    let priceAt = -1;
+    words.forEach((w, i) => {
+      if (!/^\d+(?:[.,]\d+)*[KkMm]?$/.test(w)) return;
       const v = parseShortPrice(w);
-      if (/[KkMm]$/.test(w) || v >= 150) price = v;
+      if (/[KkMm]$/.test(w) || v >= 150) { price = v; priceAt = i; }
+    });
+    // O número logo antes do preço é a pontuação (◆) da Galeria, não a nota.
+    const scoreAt = priceAt > 0 && /^\d+(?:[.,]\d+)*[KkMm]?$/.test(words[priceAt - 1]) ? priceAt - 1 : -1;
+    let rating = 0;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      if (i === scoreAt || i === priceAt) continue;
+      if (/^\d{2}$/.test(w) && +w >= 40 && +w <= 99) { rating = +w; break; }
     }
     let name = '';
     for (const t of texts) {
@@ -7055,15 +7060,49 @@
     const r = +m[1];
     const g = +m[2];
     const b = +m[3];
-    return g >= 120 && g - r >= 50 && g - b >= 30;
+    return g >= 140 && g - r >= 60 && g - b >= 60;
+  }
+
+  // Bloco de cartas escolhidas: o elemento com "N / M players done" e o
+  // menor bloco acima dele que já contém M cartas.
+  function galleryBlock(doc, nodes, idsIn) {
+    const all = Array.from(doc.querySelectorAll('div, span, p, h2, h3, h4, li'));
+    const label = all.filter((e) => /^\s*\d+\s*\/\s*\d+\s*players?\s+done\s*$/i.test(e.textContent || ''))
+      .filter((e, i, arr) => !arr.some((o) => o !== e && e.contains(o)))[0];
+    if (!label) return null;
+    const m = /(\d+)\s*\/\s*(\d+)/.exec(label.textContent);
+    const done = +m[1];
+    const total = +m[2];
+    let el = label;
+    while (el.parentElement && el.parentElement !== doc.body) {
+      el = el.parentElement;
+      if (idsIn(el).size >= Math.min(total, 1)) {
+        // Sobe até ter as M cartas (ou parar de crescer).
+        while (el.parentElement && el.parentElement !== doc.body && idsIn(el).size < total) el = el.parentElement;
+        return { el, done, total };
+      }
+    }
+    return null;
   }
 
   function parseGalleryPage(win) {
     const doc = win.document;
-    const wanted = galleryIdsFromUrl(win.location.href);
-    const nodes = Array.from(doc.querySelectorAll('a[href], img')).filter((n) => futggDefId(n.getAttribute('href') || n.getAttribute('src') || '') > 0);
+    let wanted = galleryIdsFromUrl(win.location.href);
+    const allNodes = Array.from(doc.querySelectorAll('a[href], img')).filter((n) => futggDefId(n.getAttribute('href') || n.getAttribute('src') || '') > 0);
     const idOf = (n) => futggDefId(n.getAttribute('href') || n.getAttribute('src') || '');
-    const idsIn = (el) => new Set(nodes.filter((n) => el.contains(n)).map(idOf));
+    const idsIn = (el) => new Set(allNodes.filter((n) => el.contains(n)).map(idOf));
+    // Só o primeiro bloco de cartas (o do "0 / 15 players done"); a página
+    // tem outros blocos abaixo com outras cartas.
+    const block = galleryBlock(doc, allNodes, idsIn);
+    let nodes = allNodes;
+    if (block) {
+      nodes = allNodes.filter((n) => block.el.contains(n));
+      if (!wanted.length) {
+        const seenIds = [];
+        nodes.forEach((n) => { const id = idOf(n); if (!seenIds.includes(id)) seenIds.push(id); });
+        wanted = seenIds.slice(0, block.total);
+      }
+    }
     const tiles = new Map();
     for (const n of nodes) {
       const id = idOf(n);
@@ -7105,7 +7144,9 @@
       const alts = Array.from(t.tile.querySelectorAll('img[alt]')).map((i) => i.getAttribute('alt')).filter((a) => a && !/coin|gem|score|flag|club|league|nation|logo/i.test(a));
       const r = readGalleryTexts(leaves(t.tile), slugName);
       const alt = splitCardLabel(alts[0] || '');
-      players.push({ definitionId: id, name: r.name || alt.name, rating: r.rating || alt.rating, price: r.price, owned: owned(t.tile) });
+      // A nota do texto da imagem (alt) é a mais confiável.
+      players.push({ definitionId: id, name: r.name || alt.name, rating: alt.rating || r.rating, price: r.price,
+        owned: block && block.done === 0 ? false : owned(t.tile) });
     }
     const h1 = doc.querySelector('h1');
     const fromPath = (win.location.pathname.split('/').filter(Boolean).pop() || 'Galeria').replace(/-/g, ' ');

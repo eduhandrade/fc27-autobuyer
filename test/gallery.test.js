@@ -67,3 +67,19 @@ test('galeria: compra, manda para o clube e anuncia pelo preço de empate', asyn
   assert.equal(purchases[0].listed, true);
   assert.equal(purchases[0].inClub, true);
 });
+
+test('motor: chama e espera o afterSearch a cada busca', async () => {
+  const seen = [];
+  const adapter = {
+    getCoins: () => 100000,
+    async search() { return { success: true, status: 200, items: [] }; },
+    async buy() { return { success: true }; },
+    async list() { return { success: true }; },
+  };
+  const target = { id: 'gal-7', name: 'Galeria', kind: 'player', criteria: { type: 'player', maskedDefId: 7 }, definitionId: 7, maxCount: 1, maxBuy: 1000, enabled: true };
+  const bot = new ab.Autobuyer({ adapter, getState: () => ({ settings: { delayMin: 0, delayMax: 0, pauseEvery: 0, pauseMinutes: 0, maxSearches: 4, maxBuys: 0, budget: 0 }, targets: [target] }),
+    log: () => {}, random: () => 0.5,
+    afterSearch: async (t) => { await Promise.resolve(); seen.push(t.id); } });
+  await bot.start();
+  assert.deepEqual(seen, ['gal-7', 'gal-7', 'gal-7', 'gal-7']);
+});

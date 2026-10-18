@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.0
+// @version      1.11.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.0';
+  const SCRIPT_VERSION = '1.11.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1895,6 +1895,8 @@
       this.log = opts.log || function () {};
       this.onChange = opts.onChange || function () {};
       this.onPurchase = opts.onPurchase || function () {};
+      // Opcional: chamado (e esperado) depois de cada busca de um alvo.
+      this.afterSearch = opts.afterSearch || null;
       this.onSearchResults = opts.onSearchResults || function () {};
       this.onTargetsChanged = opts.onTargetsChanged || function () {};
       this.simCount = new Map();
@@ -2012,6 +2014,10 @@
       if (!res.success) return this.handleFailure(res.status, 'busca');
       this.consecutiveErrors = 0;
       this.onSearchResults(target, res.items);
+      if (this.afterSearch) {
+        await this.afterSearch(target, res.items);
+        if (!this.running) return;
+      }
 
       const budgetLeft = s.budget > 0 ? s.budget - this.stats.spent : Infinity;
       const item = pickCandidate(res.items, target, {
@@ -5117,6 +5123,8 @@
     }
 
     let galTargets = [];
+    const GAL_TRIES_BEFORE_CHECK = 5;
+    const GAL_TRIES_RECHECK = 10;
     const galEngine = new Autobuyer({
       adapter,
       getState: () => ({ settings: Object.assign({}, app.state.settings, { maxBuys: 0, budget: 0 }), targets: galTargets }),
@@ -5139,7 +5147,34 @@
       },
       onTargetsChanged: () => { save(); renderGal(); },
       onChange: () => renderGalStatus(),
+      afterSearch: (t, items) => galCheckMarket(t, items),
     });
+
+    // Depois de 5 buscas sem achar pelo "pagar até", consulta o menor preço
+    // da carta no mercado e mostra no log (de novo a cada 10 buscas).
+    const galTries = new Map();
+    async function galCheckMarket(t, items) {
+      const n = (galTries.get(t.id) || 0) + 1;
+      galTries.set(t.id, n);
+      if (n < GAL_TRIES_BEFORE_CHECK || (n - GAL_TRIES_BEFORE_CHECK) % GAL_TRIES_RECHECK) return;
+      // Achou dentro do preço nesta busca: o bot já vai tentar comprar.
+      if (items.some((it) => it.definitionId === t.definitionId && it.buyNow > 0 && it.buyNow <= t.maxBuy)) return;
+      const g = app.state.gallery;
+      const p = g && g.players.find((x) => x.definitionId === t.definitionId);
+      const label = p ? p.name + (p.rating ? ' ' + p.rating : '') : t.name;
+      let r;
+      try {
+        r = await lowestBin({ adapter, card: { definitionId: t.definitionId, name: label } });
+      } catch (e) {
+        galTrace('Não consegui consultar o preço de ' + label + ': ' + e.message, e.fatal ? 'error' : 'warn');
+        if (e.fatal) galEngine.stop(e.stop);
+        return;
+      }
+      if (p) { p.marketNow = r.price || 0; p.marketAt = Date.now(); save(); renderGal(); }
+      galTrace(label + ': ' + n + ' buscas sem achar por até ' + fmt(t.maxBuy) + '. ' +
+        (r.price ? 'Menor preço no mercado agora: ' + fmt(r.price) + ' (revenda de empate: ' + fmt(breakEvenPrice(r.price)) + '). Use o + para subir o "pagar até".'
+          : 'Nenhum anúncio dessa carta no mercado agora.'), 'warn');
+    }
 
     function importGal(text) {
       const r = decodeSbc(text);
@@ -5181,13 +5216,17 @@
 
     function galRowHtml(p, i) {
       const sell = p.max > 0 ? breakEvenPrice(p.max) : 0;
-      const info = [p.price ? 'FUT.GG ' + fmt(p.price) : 'FUT.GG sem preço', sell && !p.bought ? 'revende por ' + fmt(sell) + ' se pagar ' + fmt(p.max) : '', galStatusOf(p)]
+      const market = p.marketNow > 0 && !p.bought ? 'mercado agora ' + fmt(p.marketNow) : '';
+      const info = [p.price ? 'FUT.GG ' + fmt(p.price) : 'FUT.GG sem preço', market, sell && !p.bought ? 'revende por ' + fmt(sell) + ' se pagar ' + fmt(p.max) : '', galStatusOf(p)]
         .filter(Boolean).join(' · ');
-      return '<div class="sbc-row" data-i="' + i + '">' +
-        '<input type="checkbox" data-gal="buy"' + (p.buy ? ' checked' : '') + (p.bought ? ' disabled' : '') + '>' +
+      const off = p.bought ? ' disabled' : '';
+      return '<div class="sbc-row" style="grid-template-columns:26px 1fr" data-i="' + i + '">' +
+        '<input type="checkbox" data-gal="buy"' + (p.buy ? ' checked' : '') + off + '>' +
         '<div><b>' + escapeHtml(p.name) + '</b> ' + (p.rating || '') +
-        '<div class="hint">' + escapeHtml(info) + '</div></div>' +
-        '<input data-gal="max" inputmode="numeric" placeholder="até" value="' + (p.max > 0 ? p.max : '') + '"' + (p.bought ? ' disabled' : '') + '>' +
+        '<div class="hint">' + escapeHtml(info) + '</div>' +
+        '<div class="stepper" style="margin-top:4px"><button type="button" data-step="-" aria-label="Diminuir"' + off + '>−</button>' +
+        '<input data-gal="max" inputmode="numeric" placeholder="pagar até" value="' + (p.max > 0 ? p.max : '') + '"' + off + '>' +
+        '<button type="button" data-step="+" aria-label="Aumentar"' + off + '>+</button></div></div>' +
         '</div>';
     }
 
@@ -5200,7 +5239,7 @@
       }
       el('galList').innerHTML = '<p class="captured"><b>' + escapeHtml(g.name) + '</b> · ' + g.players.length + ' cartas · importado em ' +
         new Date(g.at).toLocaleString('pt-BR') + '</p>' +
-        '<div class="sbc-row sbc-head"><span>Comprar</span><span>Carta</span><span>Pagar até</span></div>' +
+        '<div class="sbc-row sbc-head" style="grid-template-columns:26px 1fr"><span>Comprar</span><span>Carta · pagar até</span></div>' +
         g.players.map(galRowHtml).join('');
       renderGalTotal();
       renderGalStatus();
@@ -5239,9 +5278,18 @@
       const p = g.players[parseInt(row.dataset.i, 10)];
       if (!p) return;
       if (e.target.dataset.gal === 'buy') p.buy = e.target.checked;
-      if (e.target.dataset.gal === 'max') p.max = parseCoins(e.target.value);
+      if (e.target.dataset.gal === 'max') {
+        p.max = parseCoins(e.target.value);
+        // Comprando agora: o novo valor já vale para as próximas buscas.
+        const t = galTargets.find((x) => x.definitionId === p.definitionId);
+        if (t && p.max >= 150) {
+          t.maxBuy = p.max;
+          if (galEngine.running) galTrace(p.name + ': pagar até agora ' + fmt(p.max) + '.', 'info');
+        }
+      }
       save();
-      renderGalTotal();
+      if (e.type === 'change') renderGal();
+      else renderGalTotal();
     }
 
     async function galStartBuying() {
@@ -5259,6 +5307,7 @@
         '\n\nAté ' + fmt(total) + ' moedas presas (voltam com as vendas).' +
         (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
       const now = Date.now();
+      galTries.clear();
       galTargets = buy.map((p) => Object.assign(sbcTarget(p, g.name, p.max, now), {
         id: 'gal-' + p.definitionId,
         name: 'Galeria ' + g.name + ': ' + p.name + (p.rating ? ' ' + p.rating : ''),

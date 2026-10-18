@@ -75,6 +75,14 @@ O script também funciona no **futbin.com** (no Safari, com o mesmo Userscripts)
 
 Para o script funcionar no FUTBIN, o Userscripts precisa ter permissão em futbin.com (Ajustes → Safari → Extensões → Userscripts → Outros sites: Permitir).
 
+## Galeria do FUT (aba 🖼️ Galeria)
+
+1. No Safari, abra no FUT.GG o conjunto da Galeria (ex.: Frosinone), monte a seleção e marque as cartas que já passaram pelo seu clube.
+2. Toque em **🖼️ Enviar ao bot** (o script também roda no fut.gg).
+3. No Web App: ⚡ → aba 🖼️ Galeria → **Colar do FUT.GG**. Confira as marcadas e o "pagar até" (preço do FUT.GG − 5%).
+4. **Comprar e anunciar**: cada carta comprada vai para o clube (para contar na Galeria) e é anunciada na hora pelo preço de empate (o que você pagou + os 5% da EA).
+5. Avalie o conjunto no console.
+
 ## Lucro, lances e venda (abas 💰 Lucro, 🔨 Lances e 🏷️ Vender)
 - **Lucro:** cada compra do bot entra no registro com o preço pago. Compras antigas entram pelo "Item bought for" quando a carta está na lista de transferências ou em Não atribuídos (botão *Atualizar*, ou automaticamente sempre que você abre a lista de transferências no Web App). Quando a carta aparece como vendida, o lucro é calculado: venda − 5% da EA − preço pago. Cartas vendidas e já removidas com "Limpar vendidos" antes do registro não dá para recuperar. O registro fica salvo no navegador e vai acumulando (limpar a lista de transferências não apaga nada). Dá para filtrar por período (hoje, 7 dias, 30 dias, este mês, mês passado, tudo ou datas escolhidas) e ver o lucro por dia; a data da venda é quando o script viu a carta como vendida.
 - **Lances em massa:** escolha um alvo (ou a última busca do mercado), o lance mínimo (opcional; mínimo = máximo dá sempre aquele lance exato) e o máximo por carta, quantos lances e em quanto tempo os leilões devem terminar. O bot busca os leilões que terminam primeiro, dá o menor lance aceito e confere tipo/filtros da carta antes. *Conferir lances* move as cartas ganhas para a lista de transferências e registra o custo. Com **Revender as cartas ganhas por** preenchido, as ganhas (por padrão só as dos lances desta sessão) são anunciadas por esse preço; com a opção marcada, o bot confere e anuncia enquanto dá lances, a cada leilão seu que termina, e no fim espera os que faltam.

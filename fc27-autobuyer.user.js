@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.10.8
+// @version      1.11.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
+// @match        https://www.fut.gg/*
+// @match        https://fut.gg/*
 // @grant        none
 // @inject-into  page
 // @updateURL    https://raw.githubusercontent.com/eduhandrade/fc27-autobuyer/main/fc27-autobuyer.user.js
@@ -21,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.10.8';
+  const SCRIPT_VERSION = '1.11.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -70,6 +72,19 @@
 
   function netAfterTax(sellPrice) {
     return Math.floor(sellPrice * (1 - EA_TAX));
+  }
+
+  // Menor preço da escala da EA que, depois dos 5%, devolve o que foi pago.
+  function breakEvenPrice(paid) {
+    let p = roundDown(Math.max(MIN_PRICE, Math.ceil(paid / (1 - EA_TAX))));
+    while (netAfterTax(p) < paid && p < MAX_PRICE) p = nextPrice(p);
+    return p;
+  }
+
+  // Galeria: pagar até o preço de referência menos os 5% da revenda.
+  function galleryMaxBuy(price) {
+    if (!(price > 0)) return 0;
+    return roundDown(Math.floor(price * (1 - EA_TAX)));
   }
 
   // ---------------------------------------------------------------------------
@@ -2051,7 +2066,7 @@
         price: item.buyNow,
         target: target.name,
         targetId: target.id,
-        sellPrice: target.sellPrice > 0 ? roundDown(target.sellPrice) : 0,
+        sellPrice: target.sellBreakEven ? breakEvenPrice(item.buyNow) : target.sellPrice > 0 ? roundDown(target.sellPrice) : 0,
         listed: false,
       };
       this.log('Comprei ' + item.name + ' por ' + fmt(item.buyNow) + '!', 'success');
@@ -2065,6 +2080,15 @@
 
       if (purchase.sellPrice) {
         await this.wait(randomBetween(800, 1800, this.random));
+        // Galeria: a carta passa pelo clube antes de ir à venda (para contar).
+        if (target.clubFirst && this.adapter.moveToClub) {
+          let moved;
+          try { moved = await this.adapter.moveToClub(item.raw); } catch (e) { moved = { success: false, status: e.message }; }
+          purchase.inClub = !!moved.success;
+          if (moved.success) this.log('Mandei ' + item.name + ' para o clube.', 'info');
+          else this.log('Não consegui mandar ' + item.name + ' para o clube (erro ' + moved.status + '). Vou anunciar mesmo assim.', 'warn');
+          await this.wait(randomBetween(700, 1400, this.random));
+        }
         const startBid = prevPrice(purchase.sellPrice);
         const listed = await this.adapter.list(item.raw, startBid, purchase.sellPrice);
         if (listed.success) {
@@ -3547,6 +3571,7 @@
           history: Array.isArray(saved.history) ? saved.history : [],
           ledger: migrateLedger(saved.ledger && typeof saved.ledger === 'object' ? saved.ledger : {}),
           sbc: saved.sbc && Array.isArray(saved.sbc.players) ? saved.sbc : null,
+          gallery: saved.gallery && Array.isArray(saved.gallery.players) ? saved.gallery : null,
           bids: pruneBids(saved.bids),
           pts: saved.pts && Array.isArray(saved.pts.lines) ? saved.pts : null,
           squadIds: Array.isArray(saved.squadIds) ? saved.squadIds : [],
@@ -3778,6 +3803,7 @@
       <div class="tabs">
         <button data-tab="targets">🎯 Sniper</button>
         <button data-tab="sbc">🧩 SBC</button>
+        <button data-tab="gallery">🖼️ Galeria</button>
         <button data-tab="bids">🔨 Lances</button>
         <button data-tab="sell">🏷️ Vender</button>
         <button data-tab="profit">💰 Lucro</button>
@@ -3931,6 +3957,28 @@
           <button class="full" data-act="sbcResume" data-el="sbcResume" hidden>Reativar meus alvos pausados</button>
         </div>
       </section>
+      <section data-pane="gallery" hidden>
+        <div class="card">
+          <div class="card-h">🖼️ Galeria do FUT</div>
+          <p class="hint">1) No Safari, abra no FUT.GG o conjunto da Galeria (ex.: Frosinone), monte a seleção e marque as cartas que já passaram pelo seu clube.
+            2) Toque em <b>🖼️ Enviar ao bot</b>. 3) Volte aqui e toque em <b>Colar do FUT.GG</b>. 4) Confira e toque em <b>Comprar e anunciar</b>.</p>
+          <p class="hint">Cada carta é comprada por até o preço do FUT.GG − 5%, vai para o clube (para contar na Galeria) e é anunciada na hora pelo preço que devolve o que você pagou (empate, já com os 5% da EA).</p>
+          <button class="full price" data-act="galPaste">📋 Colar do FUT.GG</button>
+          <textarea data-el="galCode" rows="2" placeholder="Se não colar sozinho: toque e segure aqui → Colar"></textarea>
+          <button class="full" data-act="galImport">Importar código colado</button>
+          <div data-el="galList"></div>
+          <div data-el="galActions" hidden>
+            <p class="hint" data-el="galTotal"></p>
+            <div class="ed-actions">
+              <button class="go" data-act="galBuy">🛒 Comprar e anunciar</button>
+              <button class="no" data-act="galStop">Parar</button>
+            </div>
+            <div class="result" data-el="galStatus" hidden></div>
+            <div class="bidlog" data-el="galLog" hidden></div>
+            <button class="full no" data-act="galClear">🧹 Limpar conjunto (começar outro)</button>
+          </div>
+        </div>
+      </section>
       <section data-pane="profit" hidden>
         <div class="card">
           <div class="card-h">💰 Lucro</div>
@@ -4019,6 +4067,7 @@
       if (tab === 'profit') renderProfit();
       if (tab === 'bids') renderBidTargets();
       if (tab === 'sbc') { renderSbc(); renderPts(); }
+      if (tab === 'gallery') renderGal();
     }
 
     function renderFutbinError() {
@@ -4867,6 +4916,7 @@
       const r = decodeSbc(text);
       if (r.error) return win.alert('Não deu para importar: ' + r.error + '.');
       if (r.sbc.kind === 'cheapest') { setCandidates(candidatesFromList(r.sbc.players), 'FUTBIN'); el('sbcCode').value = ''; return; }
+      if (r.sbc.kind === 'gallery') { el('sbcCode').value = ''; importGal(text); tab = 'gallery'; renderTabs(); return; }
       if (sbcEngine.running) return win.alert('Pare as compras do SBC atual antes de importar outro.');
       r.sbc.players.forEach((p) => { p.buy = true; p.max = p.price >= 200 ? p.price : 0; p.owned = ''; p.bought = false; });
       app.state.sbc = r.sbc;
@@ -5055,6 +5105,179 @@
       onTargetsChanged: () => { save(); renderSbc(); },
       onChange: () => { renderSbcStatus(); renderPtsStatus(); },
     });
+
+    // ---------- Galeria do FUT (FUT.GG) ----------
+    let galTraceLines = [];
+    function galTrace(msg, level) {
+      const box = el('galLog');
+      box.hidden = false;
+      galTraceLines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
+      if (galTraceLines.length > 80) galTraceLines.length = 80;
+      box.innerHTML = galTraceLines.join('');
+    }
+
+    let galTargets = [];
+    const galEngine = new Autobuyer({
+      adapter,
+      getState: () => ({ settings: Object.assign({}, app.state.settings, { maxBuys: 0, budget: 0 }), targets: galTargets }),
+      log: (m, l) => { galTrace(m, l); log('Galeria: ' + m, l); },
+      onPurchase: (pu) => {
+        const g = app.state.gallery;
+        const p = g && g.players.find((x) => x.definitionId === pu.definitionId && !x.bought);
+        if (p) {
+          p.bought = true;
+          p.itemId = pu.itemId;
+          p.paid = pu.price;
+          p.listedFor = pu.listed ? pu.sellPrice : 0;
+          p.inClub = !!pu.inClub;
+        }
+        if (!app.state.ledger) app.state.ledger = {};
+        const e = recordBuy(app.state.ledger, { itemId: pu.itemId, name: pu.name, rating: pu.rating, definitionId: pu.definitionId, price: pu.price, source: 'galeria', at: pu.at });
+        if (e && pu.listed) { e.status = 'à venda'; e.listedFor = pu.sellPrice; }
+        save();
+        renderGal();
+      },
+      onTargetsChanged: () => { save(); renderGal(); },
+      onChange: () => renderGalStatus(),
+    });
+
+    function importGal(text) {
+      const r = decodeSbc(text);
+      if (r.error) return win.alert('Não deu para importar: ' + r.error + '.');
+      if (r.sbc.kind !== 'gallery') return win.alert('Esse código não é de um conjunto da Galeria (FUT.GG). Para SBC, use a aba 🧩 SBC.');
+      if (galEngine.running) return win.alert('Pare as compras atuais antes de importar outro conjunto.');
+      r.sbc.players.forEach((p) => {
+        p.buy = !p.owned;
+        p.max = galleryMaxBuy(p.price);
+        p.bought = false;
+        if (!p.name) p.name = (deps.players && deps.players.name && deps.players.name(baseDefId(p.definitionId))) || 'Carta ' + p.definitionId;
+      });
+      app.state.gallery = r.sbc;
+      save();
+      el('galCode').value = '';
+      galTraceLines = [];
+      el('galLog').hidden = true;
+      renderGal();
+      log('Galeria importada: ' + r.sbc.name + ' (' + r.sbc.players.length + ' cartas).', 'success');
+    }
+
+    async function pasteGal() {
+      let text = '';
+      try { text = await win.navigator.clipboard.readText(); } catch (e) { text = ''; }
+      if (!text || text.indexOf('FCAB-SBC1:') < 0) {
+        win.alert('Não consegui ler o código copiado. Toque e segure no campo de baixo → Colar → toque em "Importar código colado".');
+        el('galCode').focus();
+        return;
+      }
+      importGal(text);
+    }
+
+    function galStatusOf(p) {
+      if (p.bought) return '✅ comprada por ' + fmt(p.paid || 0) + (p.listedFor ? ' · anunciada por ' + fmt(p.listedFor) : ' · não anunciada (veja o log)');
+      if (p.owned && !p.buy) return '✅ já passou pelo clube';
+      if (galEngine.running && p.buy) return '🔎 procurando até ' + fmt(p.max);
+      return '';
+    }
+
+    function galRowHtml(p, i) {
+      const sell = p.max > 0 ? breakEvenPrice(p.max) : 0;
+      const info = [p.price ? 'FUT.GG ' + fmt(p.price) : 'FUT.GG sem preço', sell && !p.bought ? 'revende por ' + fmt(sell) + ' se pagar ' + fmt(p.max) : '', galStatusOf(p)]
+        .filter(Boolean).join(' · ');
+      return '<div class="sbc-row" data-i="' + i + '">' +
+        '<input type="checkbox" data-gal="buy"' + (p.buy ? ' checked' : '') + (p.bought ? ' disabled' : '') + '>' +
+        '<div><b>' + escapeHtml(p.name) + '</b> ' + (p.rating || '') +
+        '<div class="hint">' + escapeHtml(info) + '</div></div>' +
+        '<input data-gal="max" inputmode="numeric" placeholder="até" value="' + (p.max > 0 ? p.max : '') + '"' + (p.bought ? ' disabled' : '') + '>' +
+        '</div>';
+    }
+
+    function renderGal() {
+      const g = app.state.gallery;
+      el('galActions').hidden = !g;
+      if (!g) {
+        el('galList').innerHTML = '<p class="hint">Nenhum conjunto importado ainda.</p>';
+        return;
+      }
+      el('galList').innerHTML = '<p class="captured"><b>' + escapeHtml(g.name) + '</b> · ' + g.players.length + ' cartas · importado em ' +
+        new Date(g.at).toLocaleString('pt-BR') + '</p>' +
+        '<div class="sbc-row sbc-head"><span>Comprar</span><span>Carta</span><span>Pagar até</span></div>' +
+        g.players.map(galRowHtml).join('');
+      renderGalTotal();
+      renderGalStatus();
+    }
+
+    function renderGalTotal() {
+      const g = app.state.gallery;
+      if (!g) return;
+      const buy = g.players.filter((p) => p.buy && !p.bought);
+      const total = buy.reduce((n, p) => n + (p.max || 0), 0);
+      const bad = buy.filter((p) => !(p.max >= 150)).length;
+      const got = g.players.filter((p) => p.bought);
+      const paid = got.reduce((n, p) => n + (p.paid || 0), 0);
+      el('galTotal').innerHTML = buy.length + ' para comprar · até <b>' + fmt(total) + '</b> moedas presas (voltam com a venda)' +
+        (got.length ? ' · já comprei ' + got.length + ' por ' + fmt(paid) : '') +
+        (bad ? ' · <span class="neg">' + bad + ' sem preço (informe o "pagar até")</span>' : '');
+    }
+
+    function renderGalStatus() {
+      const box = el('galStatus');
+      const g = app.state.gallery;
+      if (!g || (!galEngine.running && !galEngine.stopReason)) { box.hidden = true; return; }
+      box.hidden = false;
+      const st = galEngine.stats || {};
+      const want = g.players.filter((p) => p.buy);
+      const got = want.filter((p) => p.bought);
+      box.innerHTML = (galEngine.running ? '🟢 Comprando' : '⏹ Parado' + (galEngine.stopReason ? ' (' + escapeHtml(galEngine.stopReason) + ')' : '')) +
+        ' · compradas <b>' + got.length + ' de ' + want.length + '</b> · anunciadas ' + got.filter((p) => p.listedFor).length +
+        (st.searches ? ' · ' + st.searches + ' busca(s)' : '');
+    }
+
+    function onGalInput(e) {
+      const row = e.target.closest('.sbc-row');
+      const g = app.state.gallery;
+      if (!row || !g || !e.target.dataset.gal) return;
+      const p = g.players[parseInt(row.dataset.i, 10)];
+      if (!p) return;
+      if (e.target.dataset.gal === 'buy') p.buy = e.target.checked;
+      if (e.target.dataset.gal === 'max') p.max = parseCoins(e.target.value);
+      save();
+      renderGalTotal();
+    }
+
+    async function galStartBuying() {
+      const g = app.state.gallery;
+      if (!g) return;
+      if (engine.running) return win.alert('Pare o Sniper antes: os dois buscando juntos chamam a atenção da EA.');
+      if (modBusy) return win.alert('Espere o módulo de ' + modBusy + ' terminar.');
+      const buy = g.players.filter((p) => p.buy && !p.bought);
+      if (!buy.length) return win.alert(g.players.some((p) => p.bought) ? 'Todas as marcadas já foram compradas.' : 'Marque pelo menos uma carta para comprar.');
+      const bad = buy.filter((p) => !(p.max >= 150));
+      if (bad.length) return win.alert('Informe quanto pagar (mínimo 150) por: ' + bad.map((p) => p.name).join(', ') + '.');
+      const total = buy.reduce((n, p) => n + p.max, 0);
+      if (!win.confirm('Galeria ' + g.name + ': comprar ' + buy.length + ' carta(s) e anunciar cada uma assim que comprar:\n\n' +
+        buy.map((p) => p.name + ' ' + (p.rating || '') + ' até ' + fmt(p.max) + ' → revende por ~' + fmt(breakEvenPrice(p.max))).join('\n') +
+        '\n\nAté ' + fmt(total) + ' moedas presas (voltam com as vendas).' +
+        (app.state.settings.dryRun ? '\n\n(Modo simulação ligado: nada será comprado.)' : '\n\nATENÇÃO: compras de verdade.'))) return;
+      const now = Date.now();
+      galTargets = buy.map((p) => Object.assign(sbcTarget(p, g.name, p.max, now), {
+        id: 'gal-' + p.definitionId,
+        name: 'Galeria ' + g.name + ': ' + p.name + (p.rating ? ' ' + p.rating : ''),
+        sellBreakEven: true,
+        clubFirst: true,
+      }));
+      modBusy = 'Galeria';
+      galTrace('Comprando ' + buy.length + ' carta(s) para a Galeria (' + g.name + ').', 'info');
+      renderGal();
+      try {
+        await galEngine.start();
+      } finally {
+        modBusy = '';
+        renderGal();
+      }
+      const left = g.players.filter((p) => p.buy && !p.bought);
+      if (!left.length) galTrace('Tudo comprado e anunciado! Avalie o conjunto da Galeria no console.', 'success');
+      else galTrace('Faltam ' + left.length + ': ' + left.map((p) => p.name).join(', ') + '. Toque em Comprar de novo para continuar (ou suba o "pagar até").', 'warn');
+    }
 
     // ---------- SBC por pontos ----------
     function ptsState() {
@@ -5998,6 +6221,20 @@
         }
         if (a === 'sellPrices') checkSellPrices(sellGroups, act);
         if (a === 'sbcPaste') pasteSbc();
+        if (a === 'galPaste') pasteGal();
+        if (a === 'galImport') importGal(el('galCode').value);
+        if (a === 'galBuy') galStartBuying();
+        if (a === 'galStop') { if (galEngine.running) galEngine.stop('parado por você'); }
+        if (a === 'galClear') {
+          if (galEngine.running) return win.alert('Pare as compras antes de limpar.');
+          if (win.confirm('Limpar o conjunto importado? (As cartas compradas continuam anunciadas.)')) {
+            app.state.gallery = null;
+            galTraceLines = [];
+            el('galLog').hidden = true;
+            save();
+            renderGal();
+          }
+        }
         if (a === 'sbcImport') importSbc(el('sbcCode').value);
         if (a === 'sbcClub') sbcCheckClub(act);
         if (a === 'sbcPrices') sbcPrices(act);
@@ -6146,6 +6383,8 @@
     });
 
     el('sbcList').addEventListener('input', onSbcInput);
+    el('galList').addEventListener('input', onGalInput);
+    el('galList').addEventListener('change', onGalInput);
     ['ptsTarget', 'ptsLines', 'ptsPlan'].forEach((k) => el(k).addEventListener('change', onPtsInput));
     el('ptsPlan').addEventListener('click', (e) => {
       const b = e.target.closest('[data-pts-cand-clear]');
@@ -6337,7 +6576,7 @@
       return {
         sbc: {
           name: String(data.name || 'SBC'),
-          kind: data.kind === 'cheapest' ? 'cheapest' : 'solution',
+          kind: ['cheapest', 'gallery'].includes(data.kind) ? data.kind : 'solution',
           url: String(data.url || ''),
           total: data.total > 0 ? data.total : 0,
           at: data.at || Date.now(),
@@ -6348,6 +6587,7 @@
             position: String(p.position || ''),
             price: p.price > 0 ? p.price : 0,
             pcPrice: p.pcPrice > 0 ? p.pcPrice : 0,
+            owned: !!p.owned,
           })),
         },
       };
@@ -6652,6 +6892,164 @@
   }
 
   // Botão "Enviar ao bot" nas páginas do FUTBIN.
+  // ---------------------------------------------------------------------------
+  // FUT.GG: conjunto da Galeria → módulo Galeria
+  // ---------------------------------------------------------------------------
+
+  // ID da carta (definitionId) num link ou imagem do FUT.GG:
+  // /players/266304-birligea/27-266304/ ou .../player-item/27-50602166.abc.webp
+  function futggDefId(url) {
+    const m = /players?[-/][^\s"']*?\b2[5-9]-(\d{4,9})\b/i.exec(String(url || ''));
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  // Cartas escolhidas no conjunto (?players=[...] na URL).
+  function galleryIdsFromUrl(href) {
+    try {
+      const raw = new URL(href).searchParams.get('players');
+      const arr = JSON.parse(raw || '[]');
+      return Array.isArray(arr) ? arr.map((x) => parseInt(x, 10)).filter((x) => x > 0) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Lê nota, nome e preço a partir dos textos de uma carta (cada texto
+  // separado, na ordem da tela). O preço é o último número de moedas.
+  function readGalleryTexts(texts, slugName) {
+    const words = [];
+    texts.forEach((t) => String(t).split(/\s+/).forEach((w) => { if (w) words.push(w); }));
+    let rating = 0;
+    for (const w of words) {
+      if (/^\d{2}$/.test(w) && +w >= 40 && +w <= 99) { rating = +w; break; }
+    }
+    let price = 0;
+    for (const w of words) {
+      if (!/^\d+(?:[.,]\d+)*[KkMm]?$/.test(w)) continue;
+      const v = parseShortPrice(w);
+      if (/[KkMm]$/.test(w) || v >= 150) price = v;
+    }
+    let name = '';
+    for (const t of texts) {
+      const v = String(t).trim();
+      if (v.length < 3 || /\d/.test(v) || STAT_LABELS.test(v) || SBC_POSITIONS.includes(v.toUpperCase())) continue;
+      if (!/^[A-Za-zÀ-ÖØ-öø-ÿĀ-žḀ-ỿ'’.\- ]+$/.test(v)) continue;
+      name = v;
+      break;
+    }
+    return { rating, price, name: name || slugName || '' };
+  }
+
+  function isGreenColor(c) {
+    const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/.exec(String(c || ''));
+    if (!m) return false;
+    if (m[4] != null && parseFloat(m[4]) < 0.3) return false;
+    const r = +m[1];
+    const g = +m[2];
+    const b = +m[3];
+    return g >= 120 && g - r >= 50 && g - b >= 30;
+  }
+
+  function parseGalleryPage(win) {
+    const doc = win.document;
+    const wanted = galleryIdsFromUrl(win.location.href);
+    const nodes = Array.from(doc.querySelectorAll('a[href], img')).filter((n) => futggDefId(n.getAttribute('href') || n.getAttribute('src') || '') > 0);
+    const idOf = (n) => futggDefId(n.getAttribute('href') || n.getAttribute('src') || '');
+    const idsIn = (el) => new Set(nodes.filter((n) => el.contains(n)).map(idOf));
+    const tiles = new Map();
+    for (const n of nodes) {
+      const id = idOf(n);
+      if (wanted.length && !wanted.includes(id)) continue;
+      if (tiles.has(id)) continue;
+      // Sobe até o maior bloco que ainda contém só esta carta.
+      let tile = n;
+      while (tile.parentElement && tile.parentElement !== doc.body && idsIn(tile.parentElement).size === 1) tile = tile.parentElement;
+      tiles.set(id, { tile, node: n });
+    }
+    const leaves = (el) => {
+      const out = [];
+      const walk = (x) => {
+        if (x.nodeType === 3) { const t = x.nodeValue.trim(); if (t) out.push(t); return; }
+        if (x.nodeType !== 1 || /^(SCRIPT|STYLE)$/.test(x.tagName)) return;
+        x.childNodes.forEach(walk);
+      };
+      walk(el);
+      return out;
+    };
+    const owned = (tile) => {
+      const els = [tile].concat(Array.from(tile.querySelectorAll('*')).slice(0, 300));
+      for (const e of els) {
+        const st = (e.getAttribute('aria-pressed') || e.getAttribute('aria-checked') || e.getAttribute('data-state') || '').toLowerCase();
+        if (st === 'true' || st === 'checked' || st === 'on') return true;
+        let cs = null;
+        try { cs = win.getComputedStyle(e); } catch (err) { cs = null; }
+        if (cs && (isGreenColor(cs.backgroundColor) || isGreenColor(cs.borderTopColor))) return true;
+      }
+      return false;
+    };
+    const order = wanted.length ? wanted : Array.from(tiles.keys());
+    const players = [];
+    for (const id of order) {
+      const t = tiles.get(id);
+      if (!t) { players.push({ definitionId: id, name: '', rating: 0, price: 0, owned: false, missing: true }); continue; }
+      const slug = /\/players\/\d+-([^/]+)/.exec(t.node.getAttribute('href') || '');
+      const slugName = slug ? slug[1].split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : '';
+      const alts = Array.from(t.tile.querySelectorAll('img[alt]')).map((i) => i.getAttribute('alt')).filter((a) => a && !/coin|gem|score|flag|club|league|nation|logo/i.test(a));
+      const r = readGalleryTexts(leaves(t.tile), slugName);
+      players.push({ definitionId: id, name: r.name || alts[0] || '', rating: r.rating, price: r.price, owned: owned(t.tile) });
+    }
+    const h1 = doc.querySelector('h1');
+    const fromPath = (win.location.pathname.split('/').filter(Boolean).pop() || 'Galeria').replace(/-/g, ' ');
+    const name = (h1 && h1.textContent.trim()) || fromPath.charAt(0).toUpperCase() + fromPath.slice(1);
+    return { name, players, wanted: wanted.length, found: tiles.size };
+  }
+
+  function bootFutgg(win) {
+    const doc = win.document;
+    const btn = doc.createElement('button');
+    btn.textContent = '🖼️ Enviar ao bot';
+    btn.style.cssText = 'position:fixed;left:12px;bottom:90px;z-index:2147483646;padding:12px 16px;border:0;border-radius:24px;' +
+      'background:#1db954;color:#fff;font:700 16px -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);display:none';
+    const box = doc.createElement('div');
+    box.style.cssText = 'position:fixed;left:8px;right:8px;bottom:150px;z-index:2147483646;background:#111;color:#eee;padding:12px;' +
+      'border-radius:12px;font:14px -apple-system,system-ui,sans-serif;max-height:60vh;overflow:auto;display:none;box-shadow:0 2px 12px rgba(0,0,0,.6)';
+    doc.body.appendChild(btn);
+    doc.body.appendChild(box);
+    const scan = () => { btn.style.display = /\/fut-gallery\/.+/i.test(win.location.pathname) ? 'block' : 'none'; };
+    scan();
+    win.setInterval(scan, 2000);
+    const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+    function show(html) {
+      box.innerHTML = html + '<p><button data-close style="padding:8px 14px;border-radius:8px;border:0">Fechar</button></p>';
+      box.style.display = 'block';
+      box.querySelector('[data-close]').onclick = () => { box.style.display = 'none'; };
+    }
+    btn.addEventListener('click', async () => {
+      const g = parseGalleryPage(win);
+      if (!g.players.length) {
+        show('<b>Não reconheci cartas neste conjunto.</b> Escolha as cartas (ou toque em Solve), role a página até ver todas e tente de novo. ' +
+          'Se continuar, copie o texto abaixo e mande no chat:<textarea readonly style="width:100%;height:90px;font-size:11px">' +
+          esc(win.location.href + ' · links de jogador: ' + doc.querySelectorAll('a[href*="/players/"]').length + ' · imagens: ' + doc.querySelectorAll('img').length) + '</textarea>');
+        return;
+      }
+      const data = { name: g.name, url: win.location.href, kind: 'gallery', at: Date.now(), total: 0,
+        players: g.players.map((p) => ({ definitionId: p.definitionId, name: p.name, rating: p.rating, price: p.price, owned: p.owned })) };
+      const code = encodeSbc(data);
+      let ok = false;
+      try { await win.navigator.clipboard.writeText(code); ok = true; } catch (e) { ok = false; }
+      const toBuy = g.players.filter((p) => !p.owned);
+      const missing = g.players.filter((p) => p.missing).length;
+      show('<b>' + esc(g.name) + '</b>: ' + g.players.length + ' carta(s), ' + toBuy.length + ' para comprar<br>' +
+        g.players.map((p) => (p.owned ? '✅ ' : '🛒 ') + esc((p.name || 'carta ' + p.definitionId) + (p.rating ? ' ' + p.rating : '')) + ' — ' +
+          (p.price ? fmt(p.price) : 'sem preço')).join('<br>') +
+        (missing ? '<p>⚠️ ' + missing + ' carta(s) da seleção não apareceram na tela: role a página até ver todas e envie de novo.</p>' : '') +
+        '<p>✅ = já passou pelo clube (marcada) · 🛒 = comprar. Dá para ajustar no bot.</p>' +
+        (ok ? '<p>✅ Copiado. No Web App: ⚡ → aba 🖼️ Galeria → <b>Colar do FUT.GG</b>.</p>'
+          : '<p>Não consegui copiar sozinho. Toque e segure no código abaixo → Selecionar tudo → Copiar:</p>') +
+        '<textarea readonly style="width:100%;height:70px;font-size:11px">' + esc(code) + '</textarea>');
+    });
+  }
+
   function bootFutbin(win) {
     const doc = win.document;
     const btn = doc.createElement('button');
@@ -6830,6 +7228,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
+    breakEvenPrice, galleryMaxBuy, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
     nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
@@ -6839,6 +7238,7 @@
     if (window.__fcabLoaded) return;
     window.__fcabLoaded = true;
     if (/(^|\.)futbin\.com$/i.test(window.location.hostname)) bootFutbin(window);
+    else if (/(^|\.)fut\.gg$/i.test(window.location.hostname)) bootFutgg(window);
     else boot(window);
   }
 })();

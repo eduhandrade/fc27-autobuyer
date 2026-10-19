@@ -97,3 +97,25 @@ test('galeria: não confunde a pontuação (◆) com a nota da carta', () => {
   assert.equal(ab.readGalleryTexts(['75', 'GK', 'Alfonso Herrero', '90', '2.3K'], '').rating, 75);
   assert.ok(!ab.isGreenColor('rgb(80, 220, 180)'), 'verde-água do diamante não conta como marcada');
 });
+
+test('galeria: barganha (10% abaixo do FUT.GG) vai para o clube e não é anunciada', async () => {
+  const calls = [];
+  const item = { tradeId: 9, id: 99, definitionId: 7, name: 'Fini', rating: 65, buyNow: 900, kind: 'player', raw: { id: 99 } };
+  const adapter = {
+    getCoins: () => 100000,
+    async search() { return { success: true, status: 200, items: [item] }; },
+    async buy() { calls.push('buy'); return { success: true, status: 200 }; },
+    async moveToClub() { calls.push('club'); return { success: true }; },
+    async list() { calls.push('list'); return { success: true }; },
+  };
+  const purchases = [];
+  const target = { id: 'gal-7', name: 'Galeria', kind: 'player', criteria: { type: 'player', maskedDefId: 7 }, definitionId: 7,
+    maxCount: 1, bought: 0, maxBuy: 1100, sellBreakEven: true, clubFirst: true, refPrice: 1200, bargainAt: 1080, enabled: true };
+  const bot = new ab.Autobuyer({ adapter, getState: () => ({ settings: { delayMin: 0, delayMax: 0, pauseEvery: 0, pauseMinutes: 0, maxSearches: 3, maxBuys: 0, budget: 0 }, targets: [target] }),
+    log: () => {}, onPurchase: (p) => purchases.push(p), random: () => 0.5 });
+  await bot.start();
+  assert.deepEqual(calls, ['buy', 'club']);
+  assert.equal(purchases[0].bargain, true);
+  assert.equal(purchases[0].listed, false);
+  assert.equal(purchases[0].inClub, true);
+});

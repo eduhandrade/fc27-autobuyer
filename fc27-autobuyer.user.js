@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.4
+// @version      1.11.5
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.4';
+  const SCRIPT_VERSION = '1.11.5';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2093,6 +2093,8 @@
         targetId: target.id,
         sellPrice: target.sellBreakEven ? breakEvenPrice(item.buyNow) : target.sellPrice > 0 ? roundDown(target.sellPrice) : 0,
         listed: false,
+        // Barganha (bem abaixo da referência): não anuncia, só avisa.
+        bargain: target.bargainAt > 0 && item.buyNow <= target.bargainAt,
       };
       this.log('Comprei ' + item.name + ' por ' + fmt(item.buyNow) + '!', 'success');
       target.bought = (target.bought || 0) + 1;
@@ -2103,6 +2105,18 @@
       }
       this.onTargetsChanged();
 
+      if (purchase.bargain) {
+        purchase.sellPrice = 0;
+        this.log('🔥 ' + item.name + ' por ' + fmt(item.buyNow) + ': ' + Math.round((1 - item.buyNow / target.refPrice) * 100) +
+          '% abaixo da referência (' + fmt(target.refPrice) + '). Não anunciei: decida você.', 'success');
+        if (target.clubFirst && this.adapter.moveToClub) {
+          await this.wait(randomBetween(800, 1800, this.random));
+          let moved;
+          try { moved = await this.adapter.moveToClub(item.raw); } catch (e) { moved = { success: false, status: e.message }; }
+          purchase.inClub = !!moved.success;
+          this.log(moved.success ? 'Mandei ' + item.name + ' para o clube.' : 'Não consegui mandar ' + item.name + ' para o clube (erro ' + moved.status + '): ficou em Não atribuídos.', moved.success ? 'info' : 'warn');
+        }
+      }
       if (purchase.sellPrice) {
         await this.wait(randomBetween(800, 1800, this.random));
         // Galeria: a carta passa pelo clube antes de ir à venda (para contar).
@@ -3989,6 +4003,7 @@
           <div class="card-h">🖼️ Galeria do FUT</div>
           <p class="hint">1) No Safari, abra no FUT.GG o conjunto da Galeria (ex.: Frosinone), monte a seleção e marque as cartas que já passaram pelo seu clube.
             2) Toque em <b>🖼️ Enviar ao bot</b>. 3) Volte aqui e toque em <b>Colar do FUT.GG</b>. 4) Confira e toque em <b>Comprar e anunciar</b>.</p>
+          <p class="hint">🔥 Se o bot comprar uma carta 10% (ou mais) abaixo do preço do FUT.GG, ele avisa e NÃO anuncia: a carta fica no clube para você decidir.</p>
           <p class="hint">Cada carta é comprada por até o preço do FUT.GG − 5%, vai para o clube (para contar na Galeria) e é anunciada na hora pelo preço que devolve o que você pagou (empate, já com os 5% da EA).</p>
           <button class="full price" data-act="galPaste">📋 Colar do FUT.GG</button>
           <textarea data-el="galCode" rows="2" placeholder="Se não colar sozinho: toque e segure aqui → Colar"></textarea>
@@ -5170,6 +5185,8 @@
 
     let galTargets = [];
     const GAL_TRIES_BEFORE_CHECK = 5;
+    // Comprou 10% (ou mais) abaixo do preço do FUT.GG: avisa e não anuncia.
+    const GAL_BARGAIN = 0.10;
     const GAL_TRIES_RECHECK = 10;
     const galEngine = new Autobuyer({
       adapter,
@@ -5184,6 +5201,9 @@
           p.paid = pu.price;
           p.listedFor = pu.listed ? pu.sellPrice : 0;
           p.inClub = !!pu.inClub;
+          p.bargain = !!pu.bargain;
+          if (pu.bargain) galTrace('🔥 BARGANHA: ' + p.name + ' comprado por ' + fmt(pu.price) + ' (FUT.GG ' + fmt(p.price) + '). Não anunciei: está ' +
+            (pu.inClub ? 'no clube' : 'em Não atribuídos') + ' para você decidir.', 'success');
         }
         if (!app.state.ledger) app.state.ledger = {};
         const e = recordBuy(app.state.ledger, { itemId: pu.itemId, name: pu.name, rating: pu.rating, definitionId: pu.definitionId, price: pu.price, source: 'galeria', at: pu.at });
@@ -5257,6 +5277,10 @@
     }
 
     function galStatusOf(p) {
+      if (p.bought && p.bargain) {
+        const off = p.price > 0 ? Math.round((1 - (p.paid || 0) / p.price) * 100) : 0;
+        return '🔥 BARGANHA: comprada por ' + fmt(p.paid || 0) + ' (' + off + '% abaixo do FUT.GG) · NÃO anunciada' + (p.inClub ? ' · está no clube' : '');
+      }
       if (p.bought) return '✅ comprada por ' + fmt(p.paid || 0) + (p.listedFor ? ' · anunciada por ' + fmt(p.listedFor) : ' · não anunciada (veja o log)');
       if (p.owned && !p.buy) return '✅ já passou pelo clube';
       if (galEngine.running && p.buy) return '🔎 procurando até ' + fmt(p.max);
@@ -5403,6 +5427,8 @@
         name: 'Galeria ' + g.name + ': ' + p.name + (p.rating ? ' ' + p.rating : ''),
         sellBreakEven: true,
         clubFirst: true,
+        refPrice: p.price || 0,
+        bargainAt: p.price > 0 ? Math.floor(p.price * (1 - GAL_BARGAIN)) : 0,
       }));
       modBusy = 'Galeria';
       galTrace('Comprando ' + buy.length + ' carta(s) para a Galeria (' + g.name + ').', 'info');

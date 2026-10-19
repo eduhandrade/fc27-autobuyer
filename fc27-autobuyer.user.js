@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.3
+// @version      1.11.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.3';
+  const SCRIPT_VERSION = '1.11.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1884,6 +1884,19 @@
     return { bin: b, start: st, notes, profitPerCard: group.avgCost ? perCard : null };
   }
 
+  // Contagem regressiva: "8 s" ou "2:05".
+  function countdownText(until, now) {
+    const secs = Math.max(0, Math.ceil((until - (now || Date.now())) / 1000));
+    if (secs < 60) return secs + ' s';
+    return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+  }
+
+  // Texto da espera de um motor: "próxima busca em 8 s" / "volta em 2:05".
+  function engineWaitText(e, now) {
+    if (!e || !e.running || !(e.waitUntil > (now || Date.now()))) return '';
+    return (e.status === 'pausado' ? 'volta em ' : 'próxima busca em ') + countdownText(e.waitUntil, now);
+  }
+
   function emptyStats() {
     return { searches: 0, buys: 0, spent: 0, listed: 0, missed: 0, errors: 0, profit: 0, skipped: 0, simulated: 0 };
   }
@@ -1938,6 +1951,7 @@
       this.running = false;
       this.stopReason = reason || 'parado por você';
       this.log('Bot parado: ' + this.stopReason + '.', 'warn');
+      this.waitUntil = 0;
       this.setStatus('parado');
       if (this._cancelWait) this._cancelWait();
     }
@@ -1971,10 +1985,15 @@
             const ms = jitter(s.pauseMinutes * 60000, 0.2, this.random);
             this.setStatus('pausado');
             this.log('Pausa de ' + Math.round(ms / 1000) + 's para não chamar atenção.');
+            this.waitUntil = Date.now() + ms;
             await this.wait(ms);
+            this.waitUntil = 0;
             if (this.running) this.setStatus('rodando');
           } else {
-            await this.wait(randomBetween(s.delayMin * 1000, s.delayMax * 1000, this.random));
+            const ms = randomBetween(s.delayMin * 1000, s.delayMax * 1000, this.random);
+            this.waitUntil = Date.now() + ms;
+            await this.wait(ms);
+            this.waitUntil = 0;
           }
         }
       } catch (err) {
@@ -2450,7 +2469,9 @@
       }
       const pause = randomBetween(s.delayMin * 1000, s.delayMax * 1000, random);
       if (!stopped()) trace('Próxima busca em ' + Math.round(pause / 1000) + ' s… (' + (res.bids + res.simulated) + ' lance(s) até agora)', 'muted');
+      if (o.onWait) o.onWait(Date.now() + pause, res);
       await wait(pause);
+      if (o.onWait) o.onWait(0, res);
     }
     if (!res.stopReason) res.stopReason = 'parado por você';
     trace('Fim: ' + res.stopReason + '.', 'warn');
@@ -4094,6 +4115,8 @@
       panel.querySelector('.dot').style.background = colors[engine.status] || '#777';
       let text = engine.status.charAt(0).toUpperCase() + engine.status.slice(1);
       if (engine.status === 'parado' && engine.stopReason) text += ' — ' + engine.stopReason;
+      const wt = engineWaitText(engine);
+      if (wt) text += ' · ' + wt;
       el('status').textContent = text;
       panel.querySelector('[data-act="start"]').disabled = engine.running;
       panel.querySelector('[data-act="stop"]').disabled = !engine.running;
@@ -4825,7 +4848,13 @@
           }
           return c.remaining != null ? WATCH_LIMIT - c.remaining : undefined;
         };
-        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, watchFree, cleanWatch, isStopped: () => modStop });
+        const onWait = (until, res) => {
+          bidWaitUntil = until;
+          bidWaitInfo = res ? (res.bids + res.simulated) + ' lance(s) até agora · ' + res.searches + ' busca(s)' : '';
+          renderBidWait();
+        };
+        const r = await runBulkBids({ adapter, plan, settings: app.state.settings, log, trace, onBid, between, watchFree, cleanWatch, onWait, isStopped: () => modStop });
+        bidWaitUntil = 0;
         el('bidResult').innerHTML = 'Terminado (' + escapeHtml(r.stopReason) + '): <b>' + (r.bids || r.simulated) + '</b> lance(s)' +
           (r.simulated ? ' simulados' : '') + ', ' + r.missed + ' não aceito(s), ' + r.searches + ' busca(s). Moedas comprometidas: ' + fmt(r.coinsCommitted) + '.';
         log('Lances em massa terminados: ' + r.stopReason + '.', 'warn');
@@ -4860,6 +4889,21 @@
     }
 
     let bidListNow = false;
+    let bidWaitUntil = 0;
+    let bidWaitInfo = '';
+    function renderBidWait() {
+      if (modBusy !== 'lances') return;
+      el('bidResult').textContent = 'Dando lances…' + (bidWaitUntil > Date.now() ? ' ⏱ próxima busca em ' + countdownText(bidWaitUntil) : ' 🔎 buscando') +
+        (bidWaitInfo ? ' · ' + bidWaitInfo : '');
+    }
+
+    // Contagem regressiva das esperas entre buscas (atualiza a cada segundo).
+    win.setInterval(() => {
+      if (engine.running && engine.waitUntil) renderStatus();
+      if (galEngine.running && galEngine.waitUntil) renderGalStatus();
+      if (sbcEngine.running && sbcEngine.waitUntil) { renderSbcStatus(); renderPtsStatus(); }
+      if (bidWaitUntil) renderBidWait();
+    }, 1000);
 
     // Lances desta sessão: guardados para anunciar só as cartas ganhas neles.
     function bidSession() {
@@ -5275,7 +5319,7 @@
       const got = want.filter((p) => p.bought);
       box.innerHTML = (galEngine.running ? '🟢 Comprando' : '⏹ Parado' + (galEngine.stopReason ? ' (' + escapeHtml(galEngine.stopReason) + ')' : '')) +
         ' · compradas <b>' + got.length + ' de ' + want.length + '</b> · anunciadas ' + got.filter((p) => p.listedFor).length +
-        (st.searches ? ' · ' + st.searches + ' busca(s)' : '');
+        (st.searches ? ' · ' + st.searches + ' busca(s)' : '') + (engineWaitText(galEngine) ? ' · ⏱ ' + engineWaitText(galEngine) : '');
     }
 
     function onGalInput(e) {
@@ -5466,7 +5510,8 @@
       if (!st || (!mine && !Object.keys(st.bought || {}).length)) { box.hidden = true; return; }
       box.hidden = false;
       const parts = st.lines.filter((l) => l.rating > 0).map((l) => 'ouro ' + l.rating + ': ' + boughtCount(st, l.rating) + ' comprada(s)');
-      box.innerHTML = (mine ? '🟢 Comprando · ' : '') + parts.join(' · ') + (mine && sbcEngine.stats.searches ? ' · ' + sbcEngine.stats.searches + ' busca(s)' : '');
+      box.innerHTML = (mine ? '🟢 Comprando · ' : '') + parts.join(' · ') + (mine && sbcEngine.stats.searches ? ' · ' + sbcEngine.stats.searches + ' busca(s)' : '') +
+        (mine && engineWaitText(sbcEngine) ? ' · ⏱ ' + engineWaitText(sbcEngine) : '');
     }
 
     function onPtsInput(e) {
@@ -5780,7 +5825,7 @@
       const st = sbcEngine.stats || {};
       box.innerHTML = (sbcEngine.running ? '🟢 Comprando' : '⏹ Parado' + (sbcEngine.stopReason ? ' (' + escapeHtml(sbcEngine.stopReason) + ')' : '')) +
         ' · comprados <b>' + got.length + ' de ' + want.length + '</b> · gasto ' + fmt(got.reduce((n, p) => n + (p.paid || 0), 0)) +
-        (st.searches ? ' · ' + st.searches + ' busca(s)' : '');
+        (st.searches ? ' · ' + st.searches + ' busca(s)' : '') + (engineWaitText(sbcEngine) ? ' · ⏱ ' + engineWaitText(sbcEngine) : '');
     }
 
     async function sbcStartBuying() {
@@ -7378,7 +7423,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
+    countdownText, engineWaitText, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
     nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 

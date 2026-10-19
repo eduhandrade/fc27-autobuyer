@@ -219,3 +219,17 @@ test('limpeza leve: remove perdidos e superados do bot, sem mover nada', async (
   assert.equal(r.lost, 1);
   assert.equal(r.outbid, 1);
 });
+
+test('contagem regressiva das esperas', async () => {
+  assert.equal(ab.countdownText(10500, 1000), '10 s');
+  assert.equal(ab.countdownText(126000, 1000), '2:05');
+  assert.equal(ab.countdownText(0, 1000), '0 s');
+  assert.equal(ab.engineWaitText({ running: true, status: 'rodando', waitUntil: 9000 }, 1000), 'próxima busca em 8 s');
+  assert.equal(ab.engineWaitText({ running: true, status: 'pausado', waitUntil: 61000 }, 1000), 'volta em 1:00');
+  assert.equal(ab.engineWaitText({ running: false, waitUntil: 9000 }, 1000), '');
+  const waits = [];
+  const ad = fakeAdapter([{ success: true, status: 200, items: [] }]);
+  await ab.runBulkBids({ adapter: ad, plan: { target, maxBid: 1000, maxBids: 5, maxSearches: 2 }, settings: S, log: () => {}, wait: noWait,
+    onWait: (until) => waits.push(until > 0) });
+  assert.deepEqual(waits, [true, false, true, false]);
+});

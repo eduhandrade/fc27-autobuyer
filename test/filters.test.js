@@ -225,3 +225,14 @@ test('posição da busca do Web App em outros formatos é reconhecida', () => {
   assert.equal(ab.mismatchReason({ kind: 'player', position: 'CB' }, t), null);
   assert.equal(ab.mismatchReason({ kind: 'player', position: 'ST' }, t), 'posição diferente');
 });
+
+test('raridade: nomes, lista e conferência da carta', () => {
+  assert.equal(ab.rarityName(3), 'TOTW (Team of the Week)');
+  ab.setRarityNames({ 0: 'Common', 1: 'Rare', 3: 'Team of the Week', 21: 'Future Stars', 48: 'Trailblazers' });
+  assert.equal(ab.rarityName(21), 'Future Stars');
+  assert.deepEqual(ab.rarityList().map((r) => r.id), [21, 3, 48]);
+  const t = { kind: 'player', criteria: { type: 'player', rarities: [21] } };
+  assert.equal(ab.mismatchReason({ kind: 'player', rarity: 3, positions: [] }, t), 'raridade diferente');
+  assert.equal(ab.mismatchReason({ kind: 'player', rarity: 21, positions: [] }, t), null);
+  assert.match(ab.describeTarget(t), /Future Stars/);
+});

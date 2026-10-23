@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.6
+// @version      1.12.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.6';
+  const SCRIPT_VERSION = '1.12.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -293,6 +293,23 @@
     return true;
   }
 
+  // Raridades (TOTW, Future Stars...): nomes vindos do próprio Web App.
+  let rarityNames = {};
+  const DEFAULT_RARITY_NAMES = { 0: 'Comum', 1: 'Rara', 3: 'TOTW (Team of the Week)', 12: 'Ícone' };
+  function setRarityNames(map) {
+    if (!map || Object.keys(map).length < 3) return false;
+    rarityNames = map;
+    return true;
+  }
+  function rarityName(id) {
+    return rarityNames[id] || DEFAULT_RARITY_NAMES[id] || ('raridade #' + id);
+  }
+  function rarityList() {
+    const map = Object.keys(rarityNames).length ? rarityNames : DEFAULT_RARITY_NAMES;
+    return Object.keys(map).map(Number).filter((id) => id > 1)
+      .map((id) => ({ id, name: map[id] })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   function chemStyleName(id) {
     return chemStyles[id] || DEFAULT_CHEM_STYLES[id] || ('estilo #' + id);
   }
@@ -548,6 +565,7 @@
       if (it.kind !== 'player') return 'não é jogador';
       if (target.definitionId > 0 && it.definitionId !== target.definitionId) return 'outra versão da carta';
       if (target.noSpecial && it.special === true) return 'carta especial';
+      if (Array.isArray(c.rarities) && c.rarities.length && it.rarity != null && !c.rarities.includes(it.rarity)) return 'raridade diferente';
       const need = (want, got, article, noun) => {
         if (isEmptyValue(want)) return null;
         if (got == null) return 'não deu para confirmar ' + article + ' ' + noun;
@@ -607,6 +625,7 @@
     if (c.league > 0) parts.push(nameFor('league', c.league, labels, names));
     if (c.nation > 0) parts.push(nameFor('nation', c.nation, labels, names));
     if (c.level && c.level !== 'any') parts.push((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level);
+    if (Array.isArray(c.rarities) && c.rarities.length) parts.push(c.rarities.map(rarityName).join(' / '));
     if (t.psPlus) parts.push('Com PlayStyle+');
     (t.playStyles || []).forEach((p) => parts.push(playStyleName(p.id, p.plus)));
     if (t.minRating > 0 && !(t.maxRating > 0)) parts.push('Nota ' + t.minRating + '+');
@@ -635,7 +654,7 @@
     if (Array.isArray(c.defId) && c.defId.length) parts.push('carta ' + c.defId.join(','));
     if (c.playStyle > 0) parts.push((kindFromCriteria(c) === 'chemstyle' ? 'estilo ' : 'com química ') + chemStyleName(c.playStyle));
     if (c.level && c.level !== 'any') parts.push('nível ' + ((LEVELS.find((l) => l[0] === c.level) || [])[1] || c.level));
-    if (Array.isArray(c.rarities) && c.rarities.length) parts.push('raridade ' + c.rarities.join(','));
+    if (Array.isArray(c.rarities) && c.rarities.length) parts.push('raridade ' + c.rarities.map(rarityName).join(', '));
     if (c.position && c.position !== 'any') parts.push('posição ' + c.position);
     if (c.league > 0) parts.push('liga ' + c.league);
     if (c.nation > 0) parts.push('país ' + c.nation);
@@ -2966,6 +2985,7 @@
           ['services.Item.searchTransferMarket', typeof item.searchTransferMarket === 'function'],
           ['services.Item.bid', typeof item.bid === 'function'],
           ['services.Item.list', typeof item.list === 'function'],
+          ['raridades (nomes do Web App): ' + (() => { try { const r = this.rarities(); return Object.keys(r).length + ' · ex.: ' + Object.values(r).slice(0, 6).join(', '); } catch (e) { return '?'; } })(), true],
           ['holográficas — campos das cartas: ' + (Array.from(holoKeys).join(', ') || 'nenhum visto ainda (faça uma busca)') +
             ' · filtros da busca: ' + (() => {
               try {
@@ -2998,6 +3018,36 @@
         } catch (e) {
           return null;
         }
+      },
+
+      // Raridades de jogador do Web App: { id: nome }.
+      rarities() {
+        const out = {};
+        try {
+          const f = G('factories');
+          const dp = f && f.DataProvider;
+          if (dp && typeof dp.getItemRarityDP === 'function') {
+            const list = dp.getItemRarityDP({ itemType: 'player', tradableOnly: true }) || [];
+            (Array.isArray(list) ? list : []).forEach((r) => {
+              const id = r && (r.id != null ? r.id : r.value);
+              const name = r && (r.label || r.name);
+              if (typeof id === 'number' && id >= 0 && name) out[id] = String(name);
+            });
+          }
+        } catch (e) { /* sem lista */ }
+        if (Object.keys(out).length < 3) {
+          const loc = this.localize();
+          if (loc) {
+            for (let id = 0; id <= 255; id++) {
+              for (const key of ['item.raretype' + id, 'search.rarity' + id, 'item.rarity' + id]) {
+                let n;
+                try { n = loc(key); } catch (e) { n = null; }
+                if (validName(n, key) && !/raretype|rarity/i.test(n)) { out[id] = n; break; }
+              }
+            }
+          }
+        }
+        return out;
       },
 
       localize() {
@@ -4262,6 +4312,7 @@
           chem: kind === 'chemstyle' ? 0 : style,
           consumable: kind === 'player' ? 0 : style,
           level: c.level && c.level !== 'any' ? c.level : '',
+          rarity: Array.isArray(c.rarities) && c.rarities.length ? c.rarities[0] : 0,
           club: c.club > 0 ? c.club : 0,
           league: c.league > 0 ? c.league : 0,
           nation: c.nation > 0 ? c.nation : 0,
@@ -4325,6 +4376,13 @@
           html += PICKERS.slice(1).map((p) => picker(p[0], p[1], p[2])).join('');
           html += section('Nível', '<div class="chips">' + chip('data-ed-level', '', 'Qualquer', !st.level) +
             LEVELS.map((l) => chip('data-ed-level', l[0], l[1], st.level === l[0])).join('') + '</div>');
+          const rl = rarityList();
+          const known = !st.rarity || rl.some((r) => r.id === st.rarity);
+          html += section('Raridade (tipo da carta especial)', '<select data-ed-rarity="1"><option value="0">Qualquer</option>' +
+            (known ? '' : '<option value="' + st.rarity + '" selected>' + escapeHtml(rarityName(st.rarity)) + '</option>') +
+            rl.map((r) => '<option value="' + r.id + '"' + (r.id === st.rarity ? ' selected' : '') + '>' + escapeHtml(r.name) + '</option>').join('') +
+            '</select>', Object.keys(rarityNames).length ? 'Ex.: TOTW, Future Stars… Igual ao filtro "Rarity" do Web App: a EA traz só essa raridade.'
+              : 'Lista curta porque os nomes do Web App ainda não carregaram. Também dá para escolher a raridade na busca do Web App e abrir o ⚡ (vem sozinha).');
           const field = psField();
           html += section('PlayStyle', '<div class="chips">' + chip('data-ed-psplus', '0', 'Qualquer', !st.psPlus) +
             chip('data-ed-psplus', '1', 'Tem PlayStyle+', st.psPlus, st.psPlus ? 'plus' : '') + '</div>',
@@ -4418,6 +4476,10 @@
         if (q) { st.query[q] = e.target.value; updateResults(q); return; }
         const n = e.target.dataset.edNum;
         if (n) st[n] = parseCoins(e.target.value);
+        if (e.target.dataset.edRarity) st.rarity = parseInt(e.target.value, 10) || 0;
+      });
+      host.addEventListener('change', (e) => {
+        if (st && e.target.dataset.edRarity) st.rarity = parseInt(e.target.value, 10) || 0;
       });
 
       return {
@@ -4437,6 +4499,8 @@
             if (st.player) criteria.maskedDefId = st.player;
             else delete criteria.maskedDefId;
             if (st.player !== (st.base.maskedDefId || 0)) delete criteria.defId;
+            if (st.rarity) criteria.rarities = [st.rarity];
+            else delete criteria.rarities;
             ['player', 'club', 'league', 'nation'].forEach((k) => { if (st[k] && st.labels[k]) labels[k] = st.labels[k]; });
           }
           if (kind === 'mgrleague') {
@@ -5247,7 +5311,7 @@
       if (exact && t.criteria && !t.criteria.rarities) {
         t.criteria.rarities = [exact.rarity];
         t.rarity = exact.rarity;
-        galTrace('Filtro de raridade especial (' + exact.rarity + ') ligado para ' + ((t.card && t.card.name) || t.name) + ': as buscas trazem só essa versão.', 'info');
+        galTrace('Filtro de raridade especial (' + rarityName(exact.rarity) + ') ligado para ' + ((t.card && t.card.name) || t.name) + ': as buscas trazem só essa versão.', 'info');
       }
       const n = (galTries.get(t.id) || 0) + 1;
       galTries.set(t.id, n);
@@ -7464,6 +7528,7 @@
       adapter.hookManualSearch((criteria, card) => ui.onCaptured(criteria, card));
       adapter.hookTransferList((items) => ui.syncFromTransferList(items, 'transfer'));
       if (loadChemStyles(adapter.localize())) ui.refreshFilters();
+      try { if (setRarityNames(adapter.rarities())) ui.refreshFilters(); } catch (e) { /* sem nomes de raridade */ }
       const hooks = overlay.install();
       ui.log('Web App detectado. Pronto para usar.', 'success');
       if (!hooks.length) ui.log('Não achei as funções que desenham as cartas; o preço do FUTBIN não vai aparecer nelas. Veja o Diagnóstico.', 'warn');
@@ -7487,7 +7552,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    countdownText, engineWaitText, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
+    countdownText, engineWaitText, rarityName, rarityList, setRarityNames, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
     nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 

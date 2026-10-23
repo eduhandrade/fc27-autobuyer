@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.11.5
+// @version      1.11.6
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.11.5';
+  const SCRIPT_VERSION = '1.11.6';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2525,7 +2525,8 @@
     let best = null;
     let searches = 0;
     for (let round = 0; round < maxRounds; round++) {
-      const criteria = { type: 'player', maskedDefId: baseDefId(card.definitionId) };
+      const criteria = exactCriteria(card.definitionId);
+      if (card.rarity > 1) criteria.rarities = [card.rarity];
       if (max) criteria.maxBuy = max;
       criteria.minBuy = round % 2 ? 0 : 150 + 50 * (searches % 3); // varia a busca para não vir do cache
       if (criteria.minBuy && max && criteria.minBuy >= max) criteria.minBuy = 0;
@@ -2838,6 +2839,7 @@
       return (x) => (x && x.itemData ? itemFromJson(x, lookup) : toItem(x));
     }
 
+    const holoKeys = new Set();
     function toItem(raw) {
       const a = auctionOf(raw);
       return {
@@ -2866,12 +2868,24 @@
         untradeable: readFlag(raw, ['untradeable', 'isUntradeable']),
         rarity: rarityOf(raw),
         special: isSpecialItem(raw),
+        holo: holoOf(raw),
         score: itemScoreOf(raw),
         marketAverage: eaMarketAverage(raw),
         minPrice: priceLimit(raw, 'min'),
         maxPrice: priceLimit(raw, 'max'),
         pile: numberOf(raw, 'pile'),
       };
+    }
+
+    // Holográfica (FC 27): o nome do campo ainda é desconhecido; guardamos os
+    // campos com "holo"/"pristine" que aparecerem, para o Diagnóstico.
+    function holoOf(raw) {
+      if (holoKeys.size < 12) {
+        let keys = [];
+        try { keys = Object.keys(raw).concat(methodNames(raw)); } catch (e) { keys = []; }
+        keys.filter((k) => /holo|pristine|foil/i.test(k)).forEach((k) => holoKeys.add(k));
+      }
+      return readFlag(raw, ['isHolographic', 'holographic', 'isHolo', 'holo', 'isPristine', 'pristine']);
     }
 
     // Raridade da EA: 0 comum, 1 rara, 2+ especial (TOTW, promo, herói...).
@@ -2952,6 +2966,14 @@
           ['services.Item.searchTransferMarket', typeof item.searchTransferMarket === 'function'],
           ['services.Item.bid', typeof item.bid === 'function'],
           ['services.Item.list', typeof item.list === 'function'],
+          ['holográficas — campos das cartas: ' + (Array.from(holoKeys).join(', ') || 'nenhum visto ainda (faça uma busca)') +
+            ' · filtros da busca: ' + (() => {
+              try {
+                const D = G('UTSearchCriteriaDTO');
+                const d = D ? new D() : {};
+                return Object.keys(d).concat(methodNames(d)).filter((k) => /holo|pristine|foil|finish/i.test(k)).join(', ') || 'nenhum';
+              } catch (e) { return '?'; }
+            })(), true],
           ['limpar lista de observação: ' + (methodNames(item).filter((n) => /untarget|unwatch|remove.*watch/i.test(n)).join(', ') || 'função não encontrada'), true],
           ['UTSearchCriteriaDTO', typeof G('UTSearchCriteriaDTO') === 'function'],
           ['saldo de moedas', this.getCoins() != null],
@@ -5220,6 +5242,13 @@
     // da carta no mercado e mostra no log (de novo a cada 10 buscas).
     const galTries = new Map();
     async function galCheckMarket(t, items) {
+      // Carta especial: aprende a raridade dela e passa a filtrar por ela.
+      const exact = items.find((it) => it.definitionId === t.definitionId && it.rarity > 1);
+      if (exact && t.criteria && !t.criteria.rarities) {
+        t.criteria.rarities = [exact.rarity];
+        t.rarity = exact.rarity;
+        galTrace('Filtro de raridade especial (' + exact.rarity + ') ligado para ' + ((t.card && t.card.name) || t.name) + ': as buscas trazem só essa versão.', 'info');
+      }
       const n = (galTries.get(t.id) || 0) + 1;
       galTries.set(t.id, n);
       if (n < GAL_TRIES_BEFORE_CHECK || (n - GAL_TRIES_BEFORE_CHECK) % GAL_TRIES_RECHECK) return;
@@ -5230,7 +5259,7 @@
       const label = p ? p.name + (p.rating ? ' ' + p.rating : '') : t.name;
       let r;
       try {
-        r = await lowestBin({ adapter, card: { definitionId: t.definitionId, name: label } });
+        r = await lowestBin({ adapter, card: { definitionId: t.definitionId, name: label, rarity: t.rarity || 0 } });
       } catch (e) {
         galTrace('Não consegui consultar o preço de ' + label + ': ' + e.message, e.fatal ? 'error' : 'warn');
         if (e.fatal) galEngine.stop(e.stop);
@@ -6914,12 +6943,21 @@
 
   // Alvo do sniper para um jogador da solução: só aquela versão e aquela nota,
   // uma carta, sem revenda (fica em Não atribuídos para o SBC).
+  // Busca da versão exata: carta especial leva também o ID da versão (defId),
+  // senão a EA devolve a versão comum e as outras especiais do jogador.
+  function exactCriteria(definitionId) {
+    const c = { type: 'player', maskedDefId: baseDefId(definitionId) };
+    // Versão especial: filtro "Qualidade: Especial" do Web App + ID exato.
+    if (definitionId !== baseDefId(definitionId)) { c.level = 'SP'; c.defId = [definitionId]; }
+    return c;
+  }
+
   function sbcTarget(p, sbcName, maxBuy, now) {
     return {
       id: (now || Date.now()).toString(36) + '-' + p.definitionId,
       name: 'SBC ' + sbcName + ': ' + p.name + (p.rating ? ' ' + p.rating : ''),
       kind: 'player',
-      criteria: { type: 'player', maskedDefId: baseDefId(p.definitionId) },
+      criteria: exactCriteria(p.definitionId),
       labels: { player: p.name },
       playStyles: [],
       definitionId: p.definitionId,
@@ -7449,7 +7487,7 @@
     targetRemaining, targetDone, countLabel,
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
-    countdownText, engineWaitText, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
+    countdownText, engineWaitText, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
     nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 

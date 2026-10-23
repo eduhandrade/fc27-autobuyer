@@ -119,3 +119,12 @@ test('galeria: barganha (10% abaixo do FUT.GG) vai para o clube e não é anunci
   assert.equal(purchases[0].listed, false);
   assert.equal(purchases[0].inClub, true);
 });
+
+test('galeria: carta especial busca com filtro de especial e ID exato', () => {
+  assert.deepEqual(ab.exactCriteria(266304), { type: 'player', maskedDefId: 266304 });
+  assert.deepEqual(ab.exactCriteria(50602166), { type: 'player', maskedDefId: 50602166 % 16777216, level: 'SP', defId: [50602166] });
+  const t = ab.sbcTarget({ definitionId: 50602166, name: 'X', rating: 80 }, 'G', 1000, 1);
+  assert.equal(t.criteria.level, 'SP');
+  const c = ab.buildCriteria(t, 0);
+  assert.deepEqual(c.defId, [50602166]);
+});

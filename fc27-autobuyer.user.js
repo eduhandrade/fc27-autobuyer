@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.12.0
+// @version      1.13.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.12.0';
+  const SCRIPT_VERSION = '1.13.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2595,7 +2595,9 @@
       recordBuy(ledger, { itemId: it.id, name: it.name, rating: it.rating, definitionId: it.definitionId, price: it.currentBid, source: 'lance' });
       // Cartas com Shadow/Hunter aplicado não são anunciadas (ficam na lista).
       const keepChem = sell && sell.skipChem && keepForChemStyle(it);
-      const toSell = sell && !keepChem && (!sell.onlyIds || sell.onlyIds.has(ledgerKey(it.id)));
+      const inSession = !sell || !sell.onlyIds || sell.onlyIds.has(ledgerKey(it.id)) || (it.tradeId > 0 && sell.onlyIds.has('t' + it.tradeId));
+      const toSell = sell && !keepChem && inSession;
+      if (sell && !keepChem && !inSession) trace('· ' + describeItem(it) + ': ganha fora desta sessão de lances, não anunciei (desmarque "só desta sessão" para anunciar).', 'muted');
       if (keepChem) trace('⏸ ' + describeItem(it) + ': tem ' + chemStyleName(it.playStyle) + ', não anunciei (ficou na lista de transferências).', 'info');
       if (s.dryRun) {
         if (toSell) {
@@ -2614,9 +2616,10 @@
       if (moved.success) { counts.moved++; counts.remaining--; }
       else {
         log('Não consegui mover ' + it.name + ' para a lista de transferências (erro ' + moved.status + ').', 'warn');
-        trace('❌ ' + describeItem(it) + ': não consegui mover para a lista (erro ' + moved.status + ').', 'warn');
+        trace('⚠️ ' + describeItem(it) + ': não consegui mover para a lista de transferências (erro ' + moved.status + '; ela pode estar cheia, com 100 itens).' +
+          (toSell ? ' Vou tentar anunciar direto da lista de observação.' : ''), 'warn');
         await wait(400);
-        continue;
+        if (!toSell) continue;
       }
       await wait(randomBetween(500, 1000, Math.random));
       if (toSell) {
@@ -2632,7 +2635,8 @@
           trace('✅ ' + describeItem(it) + ': ganha por ' + fmt(it.currentBid) + ', anunciada por ' + fmt(bin) + ' (lucro ' + fmt(profit) + ').', 'success');
         } else {
           counts.failed++;
-          trace('❌ ' + describeItem(it) + ': não consegui anunciar (erro ' + listed.status + '). Ficou na lista de transferências.', 'warn');
+          trace('❌ ' + describeItem(it) + ': não consegui anunciar por ' + fmt(bin) + ' (erro ' + listed.status + ').' +
+            (moved.success ? ' Ficou na lista de transferências.' : ' Libere espaço na lista de transferências (limpe os vendidos) e toque em Conferir lances.'), 'warn');
           const kind = classifyStatus(listed.status);
           if (FATAL_MESSAGES[kind]) { log(FATAL_MESSAGES[kind], 'error'); break; }
         }
@@ -2859,7 +2863,9 @@
     }
 
     const holoKeys = new Set();
+    let lastRaw = null;
     function toItem(raw) {
+      if (raw && typeof raw === 'object') lastRaw = raw;
       const a = auctionOf(raw);
       return {
         raw,
@@ -2998,6 +3004,55 @@
           ['UTSearchCriteriaDTO', typeof G('UTSearchCriteriaDTO') === 'function'],
           ['saldo de moedas', this.getCoins() != null],
         ];
+      },
+
+      // Confere se tudo o que o bot usa do Web App ainda existe (o Web App da
+      // EA muda com as atualizações). Cada linha: [o que, ok, essencial?].
+      healthCheck() {
+        const s = G('services') || {};
+        const item = s.Item || {};
+        const fn = (o, k) => !!o && typeof o[k] === 'function';
+        const rows = [];
+        const add = (name, ok, critical) => rows.push([name, !!ok, !!critical]);
+        add('Web App carregado (services)', !!G('services'), true);
+        add('buscar no mercado (Item.searchTransferMarket)', fn(item, 'searchTransferMarket'), true);
+        add('comprar / dar lance (Item.bid)', fn(item, 'bid'), true);
+        add('anunciar (Item.list)', fn(item, 'list'), true);
+        add('mover carta (Item.move)', fn(item, 'move'), true);
+        const Pile = G('ItemPile');
+        add('pilhas (ItemPile TRANSFER/CLUB/PURCHASED)', Pile && Pile.TRANSFER != null && Pile.CLUB != null && Pile.PURCHASED != null, true);
+        add('lista de transferências (' + (findPileMethod(item, 'transfer') || '—') + ')', !!findPileMethod(item, 'transfer'), false);
+        add('não atribuídos (' + (findPileMethod(item, 'unassigned') || '—') + ')', !!findPileMethod(item, 'unassigned'), false);
+        add('lista de observação (' + (findPileMethod(item, 'watch') || '—') + ')', !!findPileMethod(item, 'watch'), true);
+        add('limpar lista de observação (untarget)', methodNames(item).some((n) => /untarget|unwatch|remove.*watch/i.test(n)), false);
+        const DTO = G('UTSearchCriteriaDTO');
+        add('filtro de busca (UTSearchCriteriaDTO)', typeof DTO === 'function', true);
+        if (typeof DTO === 'function') {
+          let d = null;
+          try { d = new DTO(); } catch (e) { d = null; }
+          const has = (k) => !!d && (k in d || ('_' + k) in d);
+          ['maskedDefId', 'maxBuy', 'minBuy', 'maxBid', 'level', 'type'].forEach((k) => add('campo de busca ' + k, has(k), true));
+          ['rarities', 'defId', 'position', 'zone', 'club', 'league', 'nation', 'playStyle'].forEach((k) => add('campo de busca ' + k, has(k), false));
+        }
+        add('saldo de moedas', this.getCoins() != null, true);
+        add('nomes (Localization.localize)', !!this.localize(), false);
+        add('telas (getAppMain)', typeof G('getAppMain') === 'function', false);
+        add('clube (Club.search)', fn(s.Club, 'search'), false);
+        add('SBC (services.SBC)', !!s.SBC, false);
+        add('elenco (services.Squad)', !!s.Squad, false);
+        add('raridades (DataProvider.getItemRarityDP)', fn(G('factories') && G('factories').DataProvider, 'getItemRarityDP'), false);
+        if (lastRaw) {
+          const r = lastRaw;
+          const val = (k) => { try { const v = r[k] != null ? r[k] : r['_' + k]; return typeof v === 'function' ? v.call(r) : v; } catch (e) { return undefined; } };
+          add('carta: definitionId', typeof val('definitionId') === 'number', true);
+          add('carta: id', typeof val('id') === 'number', true);
+          add('carta: rating', typeof val('rating') === 'number', false);
+          const a = auctionOf(r);
+          add('carta: dados do leilão (preço/tempo)', !!(a && (a.tradeId > 0 || a.buyNowPrice > 0)), true);
+        } else {
+          add('carta (faça uma busca no mercado para conferir)', true, false);
+        }
+        return rows;
       },
 
       // Endereço do players.json que o próprio Web App já baixou.
@@ -3740,6 +3795,7 @@
 #fcab-panel button.go{background:#1db954;color:#fff}
 #fcab-panel button.no{background:#c0392b;color:#fff}
 #fcab-panel .pts-row{display:grid;grid-template-columns:56px auto 56px 1fr 30px;gap:6px;align-items:center;margin-top:8px}
+#fcab-panel .pts-row > button[data-pts-del]{grid-column:5}
 #fcab-panel .pts-row span{font-size:13px;color:#9aa0a6}
 #fcab-panel .pts-row button{padding:6px 0}
 #fcab-panel .pts-pick{display:flex;gap:8px;align-items:center;padding:4px 0;font-size:13px;border-top:1px solid #2a2d33}
@@ -3957,6 +4013,9 @@
         <div data-el="settings"></div>
         <p class="hint">Os botões ⚡ e 💲 podem ser arrastados para qualquer lugar da tela: toque, segure e arraste.</p>
         <button class="full" data-act="dockReset">Voltar os botões ⚡ 💲 para o lugar padrão</button>
+        <button class="full price" data-act="health">🩺 Verificar o Web App (depois de atualização da EA)</button>
+        <div class="result" data-el="healthBox" hidden></div>
+        <textarea data-el="healthText" rows="4" readonly hidden></textarea>
         <button class="full" data-act="diagnose">Diagnóstico do Web App</button>
         <div class="hint" data-el="diag"></div>
       </section>
@@ -4905,14 +4964,16 @@
       trace('Começando: ' + describeTarget(plan.target, names) + '.', 'info');
       try {
         const onBid = (it, amount) => {
-          if (!(it.id > 0)) return;
+          if (!(it.id > 0) && !(it.tradeId > 0)) return;
           app.state.bids = app.state.bids || {};
-          app.state.bids[ledgerKey(it.id)] = { amount, at: Date.now(), name: it.name, targetId: plan.target && plan.target.id };
+          if (it.id > 0) app.state.bids[ledgerKey(it.id)] = { amount, at: Date.now(), name: it.name, targetId: plan.target && plan.target.id };
           const sess = bidSession();
           const endsAt = Date.now() + (it.expires > 0 ? it.expires : 3600) * 1000;
-          sess.ids.push(ledgerKey(it.id));
+          // Guarda o ID da carta e o do leilão: um dos dois sempre bate na lista de observação.
+          if (it.id > 0) sess.ids.push(ledgerKey(it.id));
+          if (it.tradeId > 0) sess.ids.push('t' + it.tradeId);
           sess.until = Math.max(sess.until || 0, endsAt);
-          sess.pending = (sess.pending || []).concat([{ id: ledgerKey(it.id), at: endsAt }]);
+          sess.pending = (sess.pending || []).concat([{ id: it.id > 0 ? ledgerKey(it.id) : 't' + it.tradeId, at: endsAt }]);
           app.state.bidSession = sess;
           save();
         };
@@ -4965,6 +5026,11 @@
           trace('Lances parados por você: conferindo e anunciando as cartas já ganhas (leilões ainda abertos ficam para depois).', 'info');
           modStop = false;
           await runCollect(trace);
+        } else if (modStop && sess.ids.length) {
+          // Parar normal: não espera os leilões abertos, mas anuncia as já ganhas.
+          modStop = false;
+          trace('Parado por você: conferindo e anunciando as cartas já ganhas. Leilões ainda abertos: toque em Conferir lances quando acabarem.', 'info');
+          await runCollect(trace);
         } else if (el('bidAutoCollect').checked && !modStop && sess.ids.length && !/captcha|sessão|limitad/i.test(r.stopReason)) {
           const until = sess.until + 20000;
           trace('Esperando os leilões acabarem (até ' + new Date(until).toLocaleTimeString('pt-BR') + ') para conferir' +
@@ -4987,6 +5053,28 @@
       } finally {
         modBusy = '';
       }
+    }
+
+    // Verificação do Web App: mostra o que falta e um texto para mandar no chat.
+    function showHealth(manual) {
+      let rows;
+      try { rows = adapter.healthCheck(); } catch (e) { rows = [['verificação falhou: ' + e.message, false, true]]; }
+      const bad = rows.filter((r) => !r[1]);
+      const critical = bad.filter((r) => r[2]);
+      const head = critical.length ? '❌ O Web App mudou: ' + critical.length + ' peça(s) essencial(is) faltando. O bot pode não funcionar direito.'
+        : bad.length ? '⚠️ Essencial OK. Faltam ' + bad.length + ' extra(s) (algumas funções podem não funcionar).'
+          : '✅ Tudo certo: o bot encontrou tudo o que usa no Web App.';
+      if (manual) {
+        const box = el('healthBox');
+        box.hidden = false;
+        box.innerHTML = '<b>' + escapeHtml(head) + '</b><br>' + rows.map((r) => (r[1] ? '✅ ' : r[2] ? '❌ ' : '⚠️ ') + escapeHtml(r[0])).join('<br>');
+        const t = el('healthText');
+        t.hidden = false;
+        t.value = 'FC27 Autobuyer ' + SCRIPT_VERSION + ' · ' + head + '\n' + rows.filter((r) => !r[1]).map((r) => (r[2] ? 'FALTA: ' : 'extra: ') + r[0]).join('\n');
+      }
+      if (critical.length) log(head + ' Faltando: ' + critical.map((r) => r[0]).join(', ') + '. Toque em ⚙️ → Verificar o Web App e mande o resultado no chat.', 'error');
+      else if (manual) log(head, bad.length ? 'warn' : 'success');
+      return { rows, bad, critical };
     }
 
     let bidListNow = false;
@@ -5031,6 +5119,8 @@
       el('bidResult').textContent = 'Conferindo lista de observação…';
       const sell = bidSellPlan();
       if (sell && sell.onlyIds && !sell.onlyIds.size) trace('Nenhum lance desta sessão para anunciar (desmarque "só desta sessão" para anunciar todas as ganhas).', 'warn');
+      if (!sell) trace('Sem "Revender as cartas ganhas por": as ganhas vão para a lista de transferências sem anúncio.', 'muted');
+      else trace('Anunciando as ganhas por ' + fmt(sell.bin) + '.', 'muted');
       const botIds = new Set(Object.keys(app.state.bids || {}));
       const r = await collectWonBids(Object.assign({ adapter, ledger: ledger(), log, trace, settings: app.state.settings, sell, botIds }, extra));
       save();
@@ -5101,11 +5191,13 @@
       const m = deps.market && deps.market.get(p.definitionId);
       const now = m && m.state === 'checking' ? 'Agora …' : m && m.price > 0 ? 'Agora ' + fmt(m.price) : m ? 'Agora: sem anúncio' : '';
       const info = [p.price ? 'FUTBIN ' + fmt(p.price) : 'FUTBIN sem preço', now, sbcStatus(p)].filter(Boolean).join(' · ');
-      return '<div class="sbc-row" data-i="' + i + '">' +
+      return '<div class="sbc-row" style="grid-template-columns:26px 1fr" data-i="' + i + '">' +
         '<input type="checkbox" data-sbc="buy"' + (p.buy ? ' checked' : '') + '>' +
         '<div><b>' + escapeHtml(p.name) + '</b> ' + (p.rating || '') + ' <span class="hint">' + escapeHtml(p.position) + '</span>' +
-        '<div class="hint">' + escapeHtml(info) + '</div></div>' +
-        '<input data-sbc="max" inputmode="numeric" placeholder="até" value="' + (p.max > 0 ? p.max : '') + '">' +
+        '<div class="hint">' + escapeHtml(info) + '</div>' +
+        '<div class="stepper" style="margin-top:4px"><button type="button" data-step="-" aria-label="Diminuir">−</button>' +
+        '<input data-sbc="max" inputmode="numeric" placeholder="pagar até" value="' + (p.max > 0 ? p.max : '') + '">' +
+        '<button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>' +
         '</div>';
     }
 
@@ -5121,7 +5213,7 @@
       }
       el('sbcList').innerHTML = '<p class="captured"><b>' + escapeHtml(s.name) + '</b> · ' + s.players.length + ' jogadores · importado em ' +
         new Date(s.at).toLocaleString('pt-BR') + '</p>' +
-        '<div class="sbc-row sbc-head"><span>Comprar</span><span>Jogador</span><span>Pagar até</span></div>' +
+        '<div class="sbc-row sbc-head" style="grid-template-columns:26px 1fr"><span>Comprar</span><span>Jogador · pagar até</span></div>' +
         s.players.map(sbcRowHtml).join('');
       renderSbcTotal();
     }
@@ -5571,8 +5663,10 @@
           '<input data-pts="qty" inputmode="numeric" placeholder="qtd" value="' + (l.qty > 0 ? l.qty : '') + '">' +
           '<span>× ouro</span>' +
           '<input data-pts="rating" inputmode="numeric" placeholder="nota" value="' + (l.rating > 0 ? l.rating : '') + '">' +
-          '<input data-pts="max" inputmode="numeric" placeholder="pagar até" value="' + (l.max > 0 ? l.max : '') + '">' +
-          '<button type="button" data-pts-del="' + i + '">✕</button></div>').join('');
+          '<button type="button" data-pts-del="' + i + '">✕</button>' +
+          '<div class="stepper" style="grid-column:1/-1"><button type="button" data-step="-" aria-label="Diminuir">−</button>' +
+          '<input data-pts="max" inputmode="numeric" placeholder="pagar até (cada)" value="' + (l.max > 0 ? l.max : '') + '">' +
+          '<button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>').join('');
       }
       const total = ptsTotal(st.lines);
       const lineText = st.lines.filter((l) => l.qty > 0 && l.rating > 0)
@@ -6151,11 +6245,11 @@
           '<div class="sg-top"><b>' + escapeHtml(g.name + (g.rating ? ' ' + g.rating : '')) + '</b><span class="sg-count">Você tem ' + g.count +
           (g.items.some((it) => !it.raw) ? ' (' + g.items.filter((it) => it.raw).length + ' prontas)' : '') + '</span></div>' +
           '<p class="hint" data-s="ref">' + escapeHtml(ref) + (g.minPrice ? ' · EA permite ' + fmt(g.minPrice) + '–' + fmt(g.maxPrice) : '') + '</p>' +
-          '<div class="grid3">' +
+          '<div class="grid">' +
           '<div><label>Quantas</label><input data-s="qty" inputmode="numeric" value="0"></div>' +
-          '<div><label>Compre já</label><input data-s="bin" inputmode="numeric" value="' + (sug ? roundDown(sug) : '') + '"></div>' +
-          '<div><label>Lance inicial</label><input data-s="start" inputmode="numeric" placeholder="auto"></div>' +
-          '</div>' +
+          '<div></div></div>' +
+          '<label>Compre já</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-s="bin" inputmode="numeric" value="' + (sug ? roundDown(sug) : '') + '"><button type="button" data-step="+" aria-label="Aumentar">+</button></div>' +
+          '<label>Lance inicial</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-s="start" inputmode="numeric" placeholder="auto"><button type="button" data-step="+" aria-label="Aumentar">+</button></div>' +
           '<div class="ed-actions"><select data-s="duration"><option value="3600">1 hora</option><option value="10800">3 horas</option>' +
           '<option value="21600">6 horas</option><option value="43200">12 horas</option><option value="86400">1 dia</option>' +
           '<option value="259200">3 dias</option></select>' +
@@ -6395,9 +6489,14 @@
           const from = stepBtn.closest('.grid, .card, section').querySelector(stepBtn.dataset.from);
           cur = from ? parseCoins(from.value) : 0;
         }
+        if (!cur && input.dataset.s === 'start') {
+          const bin = stepBtn.closest('.sg') && stepBtn.closest('.sg').querySelector('[data-s="bin"]');
+          cur = bin ? parseCoins(bin.value) : 0;
+        }
         const next = stepPrice(cur, stepBtn.dataset.step === '+' ? 1 : -1);
         if (!next) return;
         input.value = next;
+        if (input.dataset.s === 'bin') input.dataset.typed = '1';
         input.dispatchEvent(new win.Event('change', { bubbles: true }));
         if (input.dataset.el === 'bidSell' || input.dataset.el === 'bidMax') updateBidSellProfit();
         return;
@@ -6458,6 +6557,7 @@
           rows.unshift(['versão do script: ' + SCRIPT_VERSION, true]);
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
         }
+        if (a === 'health') showHealth(true);
         if (a === 'profitSync') syncProfit();
         if (a === 'profitClear' && win.confirm('Apagar todo o registro de compras e lucro?')) {
           app.state.ledger = {};
@@ -6776,6 +6876,7 @@
     return {
       log,
       onCaptured,
+      checkHealth: () => showHealth(false),
       syncWatchList(items) {
         const n = recordWonBids(ledger(), items);
         if (n) {
@@ -7531,6 +7632,8 @@
       try { if (setRarityNames(adapter.rarities())) ui.refreshFilters(); } catch (e) { /* sem nomes de raridade */ }
       const hooks = overlay.install();
       ui.log('Web App detectado. Pronto para usar.', 'success');
+      // Confere se uma atualização da EA mudou algo que o bot usa.
+      setTimeout(() => { try { ui.checkHealth(); } catch (e) { /* ignora */ } }, 3000);
       if (!hooks.length) ui.log('Não achei as funções que desenham as cartas; o preço do FUTBIN não vai aparecer nelas. Veja o Diagnóstico.', 'warn');
     }, 1000);
   }

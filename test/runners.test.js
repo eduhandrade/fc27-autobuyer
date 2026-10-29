@@ -233,3 +233,31 @@ test('contagem regressiva das esperas', async () => {
     onWait: (until) => waits.push(until > 0) });
   assert.deepEqual(waits, [true, false, true, false]);
 });
+
+test('confere lances: anuncia a ganha da sessão pelo ID do leilão e tenta anunciar mesmo sem conseguir mover', async () => {
+  const listed = [];
+  const ad = {
+    async pile() {
+      return { success: true, items: [
+        { id: 70, tradeId: 555, name: 'Ganha', rating: 80, tradeState: 'closed', bidState: 'highest', currentBid: 1500, raw: { id: 70 } },
+      ] };
+    },
+    async moveToTransferList() { return { success: false, status: 473 }; },
+    async list(raw, start, bin) { listed.push([raw.id, start, bin]); return { success: true }; },
+  };
+  const traces = [];
+  const r = await ab.collectWonBids({ adapter: ad, ledger: {}, log: () => {}, trace: (m) => traces.push(m), settings: {}, wait: noWait,
+    sell: { bin: 2000, duration: 3600, onlyIds: new Set(['t555']) } });
+  assert.deepEqual(listed, [[70, 1900, 2000]]);
+  assert.equal(r.listed, 1);
+  assert.ok(traces.some((m) => /anunciar direto/.test(m)));
+});
+
+test('verificação do Web App lista o que falta', () => {
+  const ad = ab.createEaAdapter({ document: {}, services: { Item: { searchTransferMarket() {}, bid() {}, list() {} } } });
+  const rows = ad.healthCheck();
+  assert.ok(rows.length > 10);
+  const missing = rows.filter((r) => !r[1] && r[2]).map((r) => r[0]);
+  assert.ok(missing.some((n) => /Item.move/.test(n)));
+  assert.ok(!missing.some((n) => /searchTransferMarket/.test(n)));
+});

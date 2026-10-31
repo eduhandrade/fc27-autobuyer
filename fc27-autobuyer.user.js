@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.13.1
+// @version      1.13.2
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.13.1';
+  const SCRIPT_VERSION = '1.13.2';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -318,6 +318,16 @@
     return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
   }
 
+  const NOT_CHEM_NAME = /contrat|contract|cura|heal|fitness|treino|training|posi[cç]|position|kit|badge|escudo|ball|bola|stadium|estadio/;
+
+  // O nome é de OUTRO estilo de química (não o pedido)?
+  function otherChemStyleName(name, id) {
+    const n = normalizeName(name);
+    if (!n) return false;
+    const all = Object.assign({}, DEFAULT_CHEM_STYLES, chemStyles);
+    return Object.keys(all).some((k) => +k !== id && normalizeName(all[k]) === n);
+  }
+
   function isChemStyleName(name, id) {
     const n = normalizeName(name);
     return !!n && [chemStyles[id], DEFAULT_CHEM_STYLES[id]].some((x) => x && normalizeName(x) === n);
@@ -549,7 +559,15 @@
     if (target.kind === 'chemstyle') {
       if (it.kind !== 'training') return 'não é consumível';
       if (it.playStyle != null && it.playStyle > 0) return it.playStyle === c.playStyle ? null : 'estilo de química diferente';
-      return isChemStyleName(it.name, c.playStyle) ? null : 'não deu para confirmar o estilo do consumível';
+      if (isChemStyleName(it.name, c.playStyle)) return null;
+      // No FC 27 o consumível pode não trazer o ID do estilo nem o nome. A busca
+      // já vai com o filtro de estilo da EA, então só recusa o que dá para ver
+      // que é outra coisa (outro estilo ou outro tipo de consumível).
+      if (it.category && /contract|fitness|health|heal|position|kit|badge|ball|stadium|manager|league|training/i.test(it.category) &&
+        !/style|chem/i.test(it.category)) return 'não é estilo de química';
+      if (otherChemStyleName(it.name, c.playStyle)) return 'estilo de química diferente';
+      if (NOT_CHEM_NAME.test(normalizeName(it.name))) return 'não é estilo de química';
+      return c.playStyle > 0 ? null : 'não deu para confirmar o estilo do consumível';
     }
     if (target.kind === 'manager') {
       if (it.kind !== 'manager') return 'não é técnico';
@@ -2876,6 +2894,7 @@
         rating: raw.rating,
         definitionId: raw.definitionId,
         kind: itemKindOf(raw),
+        category: (() => { const v = any(raw, 'category'); return typeof v === 'string' ? v : ''; })(),
         playStyle: field(raw, 'playStyle'),
         teamId: field(raw, 'teamId'),
         leagueId: field(raw, 'leagueId'),

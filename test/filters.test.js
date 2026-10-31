@@ -71,7 +71,12 @@ test('alvo de consumível compra só o estilo certo', () => {
   assert.equal(ab.mismatchReason({ kind: 'training', playStyle: 250, name: 'Basic' }, shadowConsumable), 'estilo de química diferente');
   // Sem o ID do estilo no item, confere pelo nome; sem nome que bata, não compra.
   assert.equal(ab.mismatchReason({ kind: 'training', name: 'Shadow' }, shadowConsumable), null);
-  assert.match(ab.mismatchReason({ kind: 'training', name: 'Contrato' }, shadowConsumable), /não deu para confirmar/);
+  assert.match(ab.mismatchReason({ kind: 'training', name: 'Contrato' }, shadowConsumable), /não é estilo/);
+  // FC 27: consumível sem ID nem nome: vale o filtro de estilo da própria busca.
+  assert.equal(ab.mismatchReason({ kind: 'training', name: '' }, shadowConsumable), null);
+  assert.equal(ab.mismatchReason({ kind: 'training', name: 'Hunter' }, shadowConsumable), 'estilo de química diferente');
+  assert.match(ab.mismatchReason({ kind: 'training', name: '', category: 'contract' }, shadowConsumable), /não é estilo/);
+  assert.equal(ab.mismatchReason({ kind: 'training', name: '', category: 'playStyle' }, shadowConsumable), null);
   const items = [
     { tradeId: 1, buyNow: 400, kind: 'player', playStyle: 268 },
     { tradeId: 2, buyNow: 600, kind: 'training', playStyle: 250 },

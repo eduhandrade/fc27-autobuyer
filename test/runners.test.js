@@ -261,3 +261,16 @@ test('verificação do Web App lista o que falta', () => {
   assert.ok(missing.some((n) => /Item.move/.test(n)));
   assert.ok(!missing.some((n) => /searchTransferMarket/.test(n)));
 });
+
+test('lances: parâmetros salvos por carta escolhida', () => {
+  assert.equal(ab.bidParamKey({ id: 'abc', target: {} }), 't:abc');
+  const k1 = ab.bidParamKey({ id: '__captured', target: { criteria: { type: 'player', maskedDefId: 123, level: 'any', club: -1, maxBuy: 5000 } } });
+  const k2 = ab.bidParamKey({ id: '__captured', target: { criteria: { type: 'player', maskedDefId: 123, maxBid: 900 } } });
+  assert.equal(k1, k2, 'mesma carta, mesma chave (preços da busca não contam)');
+  assert.notEqual(k1, ab.bidParamKey({ id: '__captured', target: { criteria: { type: 'player', maskedDefId: 999 } } }));
+  const store = {};
+  for (let i = 0; i < 65; i++) ab.saveBidParams(store, 'k' + i, { bidMax: String(i) }, 1000 + i);
+  assert.equal(Object.keys(store).length, 60);
+  assert.equal(store.k64.bidMax, '64');
+  assert.equal(store.k0, undefined);
+});

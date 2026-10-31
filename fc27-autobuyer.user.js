@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.13.0
+// @version      1.13.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.13.0';
+  const SCRIPT_VERSION = '1.13.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -3716,6 +3716,31 @@
     return out;
   }
 
+  // Lances: chave dos parâmetros salvos por carta escolhida. Alvo do Sniper
+  // usa o ID dele; a "última busca do mercado" usa os filtros da busca.
+  const BID_PARAM_CRITERIA = ['type', 'category', 'maskedDefId', 'defId', 'rarities', 'level', 'league', 'nation', 'club', 'position', 'zone', 'playStyle'];
+  function bidParamKey(choice) {
+    if (!choice) return '';
+    if (choice.id !== '__captured') return 't:' + choice.id;
+    const c = (choice.target && choice.target.criteria) || {};
+    const pick = {};
+    BID_PARAM_CRITERIA.forEach((k) => {
+      const v = c[k];
+      if (v == null || v === '' || v === 'any' || v === -1 || (Array.isArray(v) && !v.length)) return;
+      pick[k] = v;
+    });
+    return 'c:' + JSON.stringify(pick);
+  }
+
+  // Guarda no máximo as últimas 60 cartas.
+  function saveBidParams(store, key, params, now) {
+    if (!key) return store;
+    store[key] = Object.assign({}, params, { at: now || Date.now() });
+    const keys = Object.keys(store).sort((a, b) => (store[b].at || 0) - (store[a].at || 0));
+    keys.slice(60).forEach((k) => { delete store[k]; });
+    return store;
+  }
+
   function createStore(storage) {
     return {
       load() {
@@ -3745,6 +3770,8 @@
           squadIds: Array.isArray(saved.squadIds) ? saved.squadIds : [],
           ptsProtected: Array.isArray(saved.ptsProtected) ? saved.ptsProtected : [],
           bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
+          bidParams: saved.bidParams && typeof saved.bidParams === 'object' ? saved.bidParams : {},
+          bidLastTarget: typeof saved.bidLastTarget === 'string' ? saved.bidLastTarget : '',
         };
       },
       save(state) {
@@ -4026,6 +4053,7 @@
           <p class="hint">O bot busca leilões que terminam logo e dá lances até o seu limite. As moedas de cada lance ficam presas até alguém cobrir.</p>
           <label>Quais cartas</label>
           <select data-el="bidTarget"></select>
+          <p class="hint" data-el="bidParamsNote"></p>
           <div class="grid">
             <div><label>Lance mínimo por carta</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidMin" inputmode="numeric" placeholder="automático"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
             <div><label>Lance máximo por carta</label><div class="stepper"><button type="button" data-step="-" aria-label="Diminuir">−</button><input data-el="bidMax" inputmode="numeric" placeholder="Ex.: 1500"><button type="button" data-step="+" aria-label="Aumentar">+</button></div></div>
@@ -4918,11 +4946,45 @@
 
     function renderBidTargets() {
       const sel = el('bidTarget');
-      const cur = sel.value;
+      const cur = sel.value || app.state.bidLastTarget || '';
       const list = bidTargets();
       sel.innerHTML = list.length
         ? list.map((x) => '<option value="' + escapeHtml(x.id) + '"' + (x.id === cur ? ' selected' : '') + '>' + escapeHtml(x.label) + '</option>').join('')
         : '<option value="">Crie um alvo no Sniper ou faça uma busca no mercado</option>';
+      loadBidParams(false);
+    }
+
+    // Últimos parâmetros de lance de cada carta escolhida.
+    const BID_FIELDS = ['bidMax', 'bidMin', 'bidCount', 'bidMinutes', 'bidSearches', 'bidSell'];
+    const BID_CHECKS = ['bidOnlySession', 'bidSkipChem', 'bidAutoCollect'];
+    let bidLoadedKey = null;
+    function currentBidChoice() {
+      return bidTargets().find((x) => x.id === el('bidTarget').value) || null;
+    }
+    function storeBidParams() {
+      const key = bidParamKey(currentBidChoice());
+      if (!key) return;
+      const params = {};
+      BID_FIELDS.forEach((f) => { params[f] = el(f).value; });
+      BID_CHECKS.forEach((f) => { params[f] = el(f).checked; });
+      app.state.bidParams = saveBidParams(app.state.bidParams || {}, key, params);
+      app.state.bidLastTarget = el('bidTarget').value;
+      bidLoadedKey = key;
+      save();
+    }
+    function loadBidParams(force) {
+      const key = bidParamKey(currentBidChoice());
+      if (!key || (!force && key === bidLoadedKey)) return;
+      bidLoadedKey = key;
+      const saved = (app.state.bidParams || {})[key];
+      if (!saved) {
+        el('bidParamsNote').textContent = 'Primeira vez com esta carta: os valores que você usar ficam salvos para ela.';
+        return;
+      }
+      BID_FIELDS.forEach((f) => { if (saved[f] != null) el(f).value = saved[f]; });
+      BID_CHECKS.forEach((f) => { if (typeof saved[f] === 'boolean') el(f).checked = saved[f]; });
+      el('bidParamsNote').textContent = '↺ Valores da última vez com esta carta (' + new Date(saved.at).toLocaleString('pt-BR').slice(0, 16) + ').';
+      updateBidSellProfit();
     }
 
     async function startBids() {
@@ -4944,6 +5006,7 @@
       if (sellBin > 0 && netAfterTax(roundDown(sellBin)) <= plan.maxBid &&
         !win.confirm('Revendendo por ' + fmt(roundDown(sellBin)) + ', as cartas ganhas pelo lance máximo dão prejuízo (5% da EA). Continuar?')) return;
       if (!(plan.maxBids > 0)) return win.alert('Informe quantos lances dar.');
+      storeBidParams();
       const problem = targetProblem(Object.assign({}, plan.target, { maxBuy: 1000 }));
       if (problem) return win.alert('Não dá para usar essas cartas: ' + problem + '.');
       const total = plan.maxBid * plan.maxBids;
@@ -6781,6 +6844,9 @@
     });
 
     panel.addEventListener('change', (e) => {
+      const elName = e.target.dataset && e.target.dataset.el;
+      if (elName === 'bidTarget') { app.state.bidLastTarget = e.target.value; save(); loadBidParams(true); return; }
+      if (elName && (BID_FIELDS.includes(elName) || BID_CHECKS.includes(elName))) storeBidParams();
       if (e.target.dataset.el === 'periodFrom' || e.target.dataset.el === 'periodTo') {
         renderProfit();
         return;
@@ -7656,7 +7722,7 @@
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     countdownText, engineWaitText, rarityName, rarityList, setRarityNames, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
-    nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
+    bidParamKey, saveBidParams, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

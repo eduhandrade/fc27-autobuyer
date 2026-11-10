@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.13.2
+// @version      1.14.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.13.2';
+  const SCRIPT_VERSION = '1.14.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2335,9 +2335,40 @@
 
   // Lê as respostas que o próprio Web App recebe (XHR e fetch) quando abre a
   // lista de transferências, não atribuídos ou observação. Não faz pedidos.
-  function installPileCapture(win, onPile) {
+  // Pedidos do Web App que podem ser compra/abertura de pacote (para o BPM).
+  function isPackUrl(url, method) {
+    const u = String(url || '');
+    if (/\/(tradepile|watchlist|transfermarket|marketdata)(\?|$|\/)/i.test(u)) return false;
+    if (/\/(store|pack|packs|purchasegroup)(\b|\/|\?|$)/i.test(u)) return true;
+    return /\/purchased\//i.test(u) && /^(post|put)$/i.test(method || '');
+  }
+
+  // Resumo seguro de um pedido capturado (sem cabeçalhos/tokens).
+  function summarizePackCapture(method, url, status, reqBody, text) {
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { json = null; }
+    const keys = json && typeof json === 'object' ? Object.keys(json).slice(0, 20) : [];
+    const items = json ? findItemArray(json) : null;
+    const path = String(url || '').replace(/^https?:\/\/[^/]+/i, '').replace(/([?&])(sid|token|auth)[^&]*/gi, '$1…');
+    return {
+      at: Date.now(),
+      method: String(method || 'GET').toUpperCase(),
+      path,
+      status,
+      request: typeof reqBody === 'string' ? reqBody.slice(0, 300) : '',
+      keys,
+      items: items ? items.length : 0,
+      sample: String(text || '').slice(0, 1200),
+    };
+  }
+
+  function installPileCapture(win, onPile, onPack) {
     if (win.__fcabPileCapture) return;
     win.__fcabPileCapture = true;
+    const packHandle = (method, url, status, body, text) => {
+      if (!onPack) return;
+      try { onPack(summarizePackCapture(method, url, status, body, text), text); } catch (e) { /* ignora */ }
+    };
     const handle = (url, text) => {
       const which = pileFromUrl(url);
       if (!which || !text) return;
@@ -2346,8 +2377,18 @@
     const XHR = win.XMLHttpRequest && win.XMLHttpRequest.prototype;
     if (XHR && XHR.open) {
       const open = XHR.open;
+      const send = XHR.send;
+      XHR.send = function (body) {
+        try { this.__fcabBody = typeof body === 'string' ? body : ''; } catch (e) { /* ignora */ }
+        return send.apply(this, arguments);
+      };
       XHR.open = function (method, url) {
         try {
+          if (isPackUrl(url, method)) {
+            this.addEventListener('load', () => {
+              try { packHandle(method, url, this.status, this.__fcabBody, this.responseText); } catch (e) { /* ignora */ }
+            });
+          }
           if (pileFromUrl(url)) {
             this.addEventListener('load', () => {
               try { if (this.status >= 200 && this.status < 300) handle(url, this.responseText); } catch (e) { /* ignora */ }
@@ -2359,9 +2400,14 @@
     }
     if (typeof win.fetch === 'function') {
       const f = win.fetch;
-      win.fetch = function (input) {
+      win.fetch = function (input, init) {
         const url = typeof input === 'string' ? input : input && input.url;
         const p = f.apply(this, arguments);
+        const method = (init && init.method) || (input && input.method) || 'GET';
+        if (isPackUrl(url, method)) {
+          const body = init && typeof init.body === 'string' ? init.body : '';
+          p.then((r) => { if (r) r.clone().text().then((t) => packHandle(method, url, r.status, body, t)).catch(() => {}); }).catch(() => {});
+        }
         if (pileFromUrl(url)) {
           p.then((r) => { if (r && r.ok) r.clone().text().then((t) => handle(url, t)).catch(() => {}); }).catch(() => {});
         }
@@ -3760,6 +3806,26 @@
     return store;
   }
 
+  // Backup de todos os dados do bot (cópia para colar numa nota).
+  const BACKUP_PREFIX = 'FCAB-BKP1:';
+  function encodeBackup(state) {
+    const json = JSON.stringify(Object.assign({ backupAt: Date.now(), backupVersion: SCRIPT_VERSION }, state));
+    return BACKUP_PREFIX + btoa(unescape(encodeURIComponent(json)));
+  }
+  function decodeBackup(text) {
+    const s = String(text || '');
+    const i = s.indexOf(BACKUP_PREFIX);
+    if (i < 0) return { error: 'não achei o código do backup (ele começa com ' + BACKUP_PREFIX + ')' };
+    const b64 = s.slice(i + BACKUP_PREFIX.length).replace(/\s+/g, '').match(/^[A-Za-z0-9+/=]+/);
+    try {
+      const data = JSON.parse(decodeURIComponent(escape(atob(b64 ? b64[0] : ''))));
+      if (!data || typeof data !== 'object' || !data.settings) return { error: 'o código não parece um backup do bot' };
+      return { data };
+    } catch (e) {
+      return { error: 'código incompleto ou corrompido (copie a nota inteira)' };
+    }
+  }
+
   function createStore(storage) {
     return {
       load() {
@@ -3790,6 +3856,7 @@
           ptsProtected: Array.isArray(saved.ptsProtected) ? saved.ptsProtected : [],
           bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
           bidParams: saved.bidParams && typeof saved.bidParams === 'object' ? saved.bidParams : {},
+          lastBackupAt: saved.lastBackupAt > 0 ? saved.lastBackupAt : 0,
           bidLastTarget: typeof saved.bidLastTarget === 'string' ? saved.bidLastTarget : '',
         };
       },
@@ -3797,6 +3864,14 @@
         try {
           storage.setItem(STORAGE_KEY, JSON.stringify(state));
         } catch (e) { /* armazenamento indisponível */ }
+      },
+      // Restaura um backup: grava e relê pelas mesmas regras do load().
+      restore(data) {
+        const copy = Object.assign({}, data);
+        delete copy.backupAt;
+        delete copy.backupVersion;
+        storage.setItem(STORAGE_KEY, JSON.stringify(copy));
+        return this.load();
       },
     };
   }
@@ -4064,6 +4139,15 @@
         <textarea data-el="healthText" rows="4" readonly hidden></textarea>
         <button class="full" data-act="diagnose">Diagnóstico do Web App</button>
         <div class="hint" data-el="diag"></div>
+        <div class="card">
+          <div class="card-h">💾 Backup dos dados do bot</div>
+          <p class="hint">Lucro, alvos, lances, SBC, Galeria e configurações ficam guardados só neste Safari. Limpar os dados do site apaga tudo.
+            Copie o backup e cole numa nota (app Notas) de vez em quando.</p>
+          <p class="hint" data-el="backupInfo"></p>
+          <button class="full price" data-act="backupCopy">📋 Copiar backup</button>
+          <textarea data-el="backupText" rows="3" placeholder="Para restaurar: cole aqui o backup da sua nota"></textarea>
+          <button class="full no" data-act="backupRestore">♻️ Restaurar backup colado</button>
+        </div>
       </section>
       <section data-pane="log" hidden><div class="log" data-el="log"></div></section>
       <section data-pane="bids" hidden>
@@ -4219,6 +4303,14 @@
           <p class="hint">Compras do bot entram sozinhas. Compras antigas entram pelo "Item bought for" quando a carta está na lista de transferências ou em Não atribuídos. Sempre que você abre a lista de transferências no Web App, o registro é atualizado, inclusive as vendidas, antes de "Limpar vendidos". Lucro = venda − 5% da EA − preço pago.</p>
           <div class="rows" data-el="profitRows"></div>
         </div>
+        <div class="card">
+          <div class="card-h">📦 BPM — diagnóstico da compra de pacote</div>
+          <p class="hint">Passo 1 do rastreio do BPM: com o Web App aberto, compre e abra 1 pacote bronze (740) na loja. O bot guarda o que o Web App
+            mandou e recebeu. Depois toque em <b>Copiar diagnóstico</b> e mande no chat.</p>
+          <div class="result" data-el="packDiag">Nenhuma compra de pacote capturada ainda.</div>
+          <button class="full" data-act="packDiagCopy">📋 Copiar diagnóstico do pacote</button>
+          <textarea data-el="packDiagText" rows="4" readonly hidden></textarea>
+        </div>
       </section>
     `;
 
@@ -4287,6 +4379,7 @@
       panel.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
       if (tab === 'log') renderLog();
       if (tab === 'profit') renderProfit();
+      if (tab === 'settings') renderBackupInfo();
       if (tab === 'bids') renderBidTargets();
       if (tab === 'sbc') { renderSbc(); renderPts(); }
       if (tab === 'gallery') renderGal();
@@ -5157,6 +5250,59 @@
       if (critical.length) log(head + ' Faltando: ' + critical.map((r) => r[0]).join(', ') + '. Toque em ⚙️ → Verificar o Web App e mande o resultado no chat.', 'error');
       else if (manual) log(head, bad.length ? 'warn' : 'success');
       return { rows, bad, critical };
+    }
+
+    // ---------- Backup ----------
+    function renderBackupInfo() {
+      const at = app.state.lastBackupAt;
+      el('backupInfo').textContent = at ? 'Último backup copiado: ' + new Date(at).toLocaleString('pt-BR') + '.' : 'Você ainda não copiou nenhum backup.';
+    }
+    async function copyBackup() {
+      app.state.lastBackupAt = Date.now();
+      save();
+      const code = encodeBackup(app.state);
+      let ok = false;
+      try { await win.navigator.clipboard.writeText(code); ok = true; } catch (e) { ok = false; }
+      el('backupText').value = code;
+      renderBackupInfo();
+      const kb = Math.round(code.length / 1024);
+      log(ok ? 'Backup copiado (' + kb + ' KB). Cole numa nota do app Notas.' : 'Não consegui copiar sozinho: o backup está no campo abaixo (toque e segure → Selecionar tudo → Copiar).', ok ? 'success' : 'warn');
+      if (ok) win.alert('Backup copiado (' + kb + ' KB). Agora cole numa nota do app Notas.');
+    }
+    function restoreBackup() {
+      if (engine.running || modBusy) return win.alert('Pare o bot/módulo antes de restaurar.');
+      const r = decodeBackup(el('backupText').value);
+      if (r.error) return win.alert('Não deu para restaurar: ' + r.error + '.');
+      const when = r.data.backupAt ? new Date(r.data.backupAt).toLocaleString('pt-BR') : 'data desconhecida';
+      const n = Object.keys(r.data.ledger || {}).length;
+      if (!win.confirm('Restaurar o backup de ' + when + ' (' + n + ' registro(s) de lucro)?\n\nOs dados atuais do bot serão substituídos.')) return;
+      try {
+        app.state = deps.store.restore(r.data);
+      } catch (e) {
+        return win.alert('Não consegui gravar o backup: ' + e.message);
+      }
+      log('Backup de ' + when + ' restaurado. Recarregando a página…', 'success');
+      setTimeout(() => win.location.reload(), 800);
+    }
+
+    // ---------- BPM: diagnóstico da compra de pacote ----------
+    const packCaptures = [];
+    function onPackCapture(cap) {
+      packCaptures.unshift(cap);
+      if (packCaptures.length > 8) packCaptures.length = 8;
+      el('packDiag').innerHTML = packCaptures.map((c) => escapeHtml(new Date(c.at).toLocaleTimeString('pt-BR') + ' ' + c.method + ' ' + c.path.slice(0, 80) +
+        ' → ' + c.status + (c.items ? ' · ' + c.items + ' carta(s)' : ''))).join('<br>');
+      if (cap.items) log('BPM: capturei uma resposta com ' + cap.items + ' carta(s) (' + cap.method + ' ' + cap.path.slice(0, 60) + ').', 'info');
+    }
+    async function copyPackDiag() {
+      const text = 'FC27 Autobuyer ' + SCRIPT_VERSION + ' · diagnóstico de pacote\n' + (packCaptures.length
+        ? packCaptures.map((c) => [new Date(c.at).toISOString(), c.method, c.path, 'status ' + c.status, 'cartas ' + c.items,
+          'chaves: ' + c.keys.join(','), 'pedido: ' + c.request, 'resposta: ' + c.sample].join('\n')).join('\n---\n')
+        : 'nada capturado (compre e abra um pacote com o Web App aberto e o bot carregado)');
+      const t = el('packDiagText');
+      t.hidden = false;
+      t.value = text;
+      try { await win.navigator.clipboard.writeText(text); log('Diagnóstico do pacote copiado. Mande no chat.', 'success'); } catch (e) { t.select(); }
     }
 
     let bidListNow = false;
@@ -6640,6 +6786,9 @@
           el('diag').innerHTML = rows.map(([name, ok]) => (ok ? '✅ ' : '❌ ') + escapeHtml(name)).join('<br>');
         }
         if (a === 'health') showHealth(true);
+        if (a === 'backupCopy') copyBackup();
+        if (a === 'backupRestore') restoreBackup();
+        if (a === 'packDiagCopy') copyPackDiag();
         if (a === 'profitSync') syncProfit();
         if (a === 'profitClear' && win.confirm('Apagar todo o registro de compras e lucro?')) {
           app.state.ledger = {};
@@ -6962,6 +7111,7 @@
       log,
       onCaptured,
       checkHealth: () => showHealth(false),
+      onPackCapture,
       syncWatchList(items) {
         const n = recordWonBids(ledger(), items);
         if (n) {
@@ -7658,7 +7808,7 @@
       piles[which] = { at: Date.now(), items };
       if (ui && (which === 'transfer' || which === 'unassigned')) ui.syncFromTransferList(items, which);
       if (ui && which === 'watch') ui.syncWatchList(items);
-    });
+    }, (cap) => { if (ui) ui.onPackCapture(cap); });
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
     const futbinRequest = withCircuitBreaker(bridge);
@@ -7741,7 +7891,7 @@
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     countdownText, engineWaitText, rarityName, rarityList, setRarityNames, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
-    bidParamKey, saveBidParams, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
+    bidParamKey, saveBidParams, encodeBackup, decodeBackup, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -124,3 +124,36 @@ test('BPM: preço de mercado usa a busca do tipo certo', async () => {
   assert.equal(searched[0].type, 'training');
   assert.deepEqual(searched[0].defId, [5002004]);
 });
+
+test('BPM: venda rápida em massa dos Não atribuídos e ações feitas no Web App', () => {
+  const now = 1000000;
+  const mk = (id, extra) => Object.assign({ itemId: id, source: 'bpm', status: 'comprada', boughtAt: now - 60000, discardValue: 40 }, extra);
+  const ledger = {
+    i1: mk(1),
+    i2: mk(2),
+    i3: mk(3),
+    i4: mk(4),
+    i5: mk(5, { boughtAt: now - 5000 }),
+    i6: mk(6, { source: 'bot' }),
+  };
+  // No Web App: anunciou a 1, mandou a 2 para a lista e a 3 para o clube.
+  assert.equal(ab.applyBpmMutation(ledger, 'POST', '/ut/game/fc27/auctionhouse', JSON.stringify({ itemData: { id: 1 }, startingBid: 250, buyNowPrice: 300, duration: 3600 })), 1);
+  assert.equal(ledger.i1.status, 'à venda');
+  assert.equal(ledger.i1.listedFor, 300);
+  assert.equal(ab.applyBpmMutation(ledger, 'PUT', '/ut/game/fc27/item', JSON.stringify({ itemData: [{ id: 2, pile: 'trade' }, { id: 3, pile: 'club' }] })), 2);
+  assert.equal(ledger.i2.status, 'na lista');
+  assert.equal(ledger.i3.status, 'no clube');
+  // Depois, "Quick Sell" de todos: os Não atribuídos ficam vazios.
+  const n = ab.reconcileBpmUnassigned(ledger, [], now);
+  assert.equal(n, 1, 'só a 4 (a 5 acabou de chegar, a 6 não é do BPM)');
+  assert.equal(ledger.i4.status, 'venda rápida');
+  assert.equal(ledger.i4.qsValue, 40);
+  assert.equal(ledger.i1.status, 'à venda');
+  assert.equal(ledger.i2.status, 'na lista');
+  assert.equal(ledger.i3.status, 'no clube');
+  // Carta vista nos Não atribuídos (sync marca pile) também entra.
+  const l2 = { i7: mk(7, { status: 'na lista', pile: 'unassigned' }), i8: mk(8, { status: 'na lista', pile: 'transfer' }) };
+  assert.equal(ab.reconcileBpmUnassigned(l2, [], now), 1);
+  assert.equal(l2.i7.status, 'venda rápida');
+  assert.equal(l2.i8.status, 'na lista');
+});

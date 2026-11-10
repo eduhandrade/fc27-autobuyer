@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.15.2
+// @version      1.15.3
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.15.2';
+  const SCRIPT_VERSION = '1.15.3';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -1647,6 +1647,7 @@
       // Troca o nome provisório ("Carta 85 #50") pelo nome real quando aparecer.
       if (it.name && /^Carta /.test(e.name || '') && !/^Carta /.test(it.name)) e.name = it.name;
       const state = SALE_STATES[it.tradeState] || (it.tradeState ? it.tradeState : 'na lista');
+      if (pile) e.pile = pile;
       if (e.status === 'vendida') continue;
       e.status = state;
       if (it.tradeState === 'active' || it.tradeState === 'expired') e.listedFor = it.buyNow || e.listedFor || 0;
@@ -2375,7 +2376,7 @@
     // Diagnóstico: todo pedido que muda algo (POST/PUT/DELETE) ao servidor da EA.
     const mutHandle = (method, url, status, body) => {
       if (!onPack || /^get$/i.test(method || 'GET') || !/\/ut\/game\//i.test(String(url || ''))) return;
-      try { onPack(Object.assign(summarizePackCapture(method, url, status, body, ''), { mutation: true }), ''); } catch (e) { /* ignora */ }
+      try { onPack(Object.assign(summarizePackCapture(method, url, status, body, ''), { mutation: true, body: typeof body === 'string' ? body : '' }), ''); } catch (e) { /* ignora */ }
     };
     const packHandle = (method, url, status, body, text) => {
       if (!onPack) return;
@@ -3949,6 +3950,55 @@
     return n;
   }
 
+  // O que você fez com a carta no próprio Web App (anunciar, mandar para a
+  // lista ou para o clube), lido do pedido que o Web App mandou à EA.
+  function applyBpmMutation(ledger, method, path, body) {
+    let j = null;
+    try { j = JSON.parse(body || ''); } catch (e) { j = null; }
+    if (!j || !ledger) return 0;
+    let n = 0;
+    const touch = (id, fn) => {
+      const e = ledger[ledgerKey(id)];
+      if (!e || e.source !== 'bpm' || bpmRealized(e)) return;
+      fn(e);
+      n++;
+    };
+    const m = String(method || '').toUpperCase();
+    if (m === 'POST' && /\/auctionhouse(\?|$|\/)/i.test(path) && j.itemData && j.itemData.id > 0) {
+      touch(j.itemData.id, (e) => { e.status = 'à venda'; e.pile = 'transfer'; if (j.buyNowPrice > 0) e.listedFor = j.buyNowPrice; });
+    } else if (m === 'PUT' && /\/item(\?|$)/i.test(path) && Array.isArray(j.itemData)) {
+      j.itemData.forEach((x) => {
+        if (!x || !(x.id > 0)) return;
+        const pile = String(x.pile || '').toLowerCase();
+        if (pile === 'trade' || pile === 'transfer') touch(x.id, (e) => { e.pile = 'transfer'; if (e.status === 'comprada') e.status = 'na lista'; });
+        else if (pile === 'club') touch(x.id, (e) => { e.pile = 'club'; e.status = 'no clube'; });
+      });
+    }
+    return n;
+  }
+
+  // Venda rápida em massa ("Quick Sell" dos Não atribuídos): as cartas do
+  // pacote que ainda estavam lá e sumiram, sem ir para a lista nem para o
+  // clube, foram vendidas rápido.
+  function reconcileBpmUnassigned(ledger, unassignedItems, now) {
+    now = now || Date.now();
+    const present = new Set((unassignedItems || []).map((it) => it.id));
+    let n = 0;
+    for (const e of Object.values(ledger || {})) {
+      if (!e || e.source !== 'bpm' || bpmRealized(e) || present.has(e.itemId)) continue;
+      // Só as que estavam nos Não atribuídos (nunca vistas na lista/clube).
+      const wasUnassigned = e.pile === 'unassigned' || (!e.pile && e.status === 'comprada');
+      if (!wasUnassigned || e.status === 'à venda' || e.status === 'no clube') continue;
+      if (!(e.boughtAt > 0) || now - e.boughtAt < 15000) continue;
+      e.status = 'venda rápida';
+      e.qsValue = e.discardValue || 0;
+      e.qsAt = now;
+      e.qsGuessed = true;
+      n++;
+    }
+    return n;
+  }
+
   // Quanto a carta já rendeu (vendida: valor − 5%; venda rápida: valor) e
   // quando. Em SBC/clube conta 0.
   function bpmRealized(e) {
@@ -4033,7 +4083,7 @@
   // Cartas do BPM que ainda podem ser vendidas (não vendidas, não em SBC).
   function bpmSellable(ledger) {
     return Object.values(ledger || {}).filter((e) => e && e.source === 'bpm' && !bpmRealized(e) &&
-      e.status !== 'à venda' && e.status !== 'removida' && !e.closedZero);
+      e.status !== 'à venda' && e.status !== 'removida' && e.status !== 'no clube' && !e.closedZero);
   }
 
   // Últimos pacotes com o resultado de cada um.
@@ -4555,6 +4605,8 @@
           <div class="card-h">📦 Lucro do BPM (pacotes de 750)</div>
           <p class="hint">Com o bot carregado, cada pacote de 750 comprado no Web App entra aqui sozinho, com as cartas dele. As vendas entram quando
             você abre a lista de transferências (antes de "Clear Sold"). Venda rápida conta pelo valor de venda rápida; carta usada em SBC ou guardada conta 0.</p>
+          <label><input type="checkbox" data-el="bpmAutoQuick" checked> Cartas do pacote que saem dos Não atribuídos sem ir para a lista de transferências nem para o clube
+            contam como venda rápida (para o botão "Quick Sell" de todas do Web App)</label>
           <div class="chips" data-el="bpmChips"></div>
           <div data-el="bpmBox"></div>
           <button class="full" data-act="profitSync">Atualizar com a lista de transferências</button>
@@ -5553,7 +5605,11 @@
     // ---------- BPM: diagnóstico da compra de pacote ----------
     const packCaptures = [];
     let bpmHours = 6;
+    function bpmAutoQuick() {
+      return !(app.state.bpm && app.state.bpm.autoQuick === false);
+    }
     function renderBpm() {
+      el('bpmAutoQuick').checked = bpmAutoQuick();
       el('bpmChips').innerHTML = BPM_WINDOWS.map((h) => '<button type="button" class="chip' + (h === bpmHours ? ' on' : '') + '" data-bpm-h="' + h + '">' + h + ' h</button>').join('');
       const sum = bpmSummary(app.state, bpmHours);
       const c = sum.cash;
@@ -5605,6 +5661,10 @@
           const r = await readPile(w);
           if (!r.ok) { bpmTrace('Não consegui ler ' + PILE_NAMES[w] + ' (' + r.why + ').', 'warn'); continue; }
           applySync(r.items, true, w);
+          if (w === 'unassigned' && bpmAutoQuick() && /^função/.test(r.source || '')) {
+            const n = reconcileBpmUnassigned(app.state.ledger, r.items);
+            if (n) bpmTrace(n + ' carta(s) saíram dos Não atribuídos sem ir para a lista nem para o clube: contei como venda rápida.', 'info');
+          }
           r.items.forEach((it) => { if (it.id > 0) byId.set(it.id, it); });
         }
         const open = bpmSellable(ledger());
@@ -5762,7 +5822,14 @@
     }
 
     function onPackCapture(cap, text) {
-      if (cap && cap.mutation) { pushPackCapture(cap); return; }
+      if (cap && cap.mutation) {
+        pushPackCapture(cap);
+        if (cap.status >= 200 && cap.status < 300 && applyBpmMutation(app.state.ledger, cap.method, cap.path, cap.body)) {
+          save();
+          if (tab === 'profit' && !panel.hidden) renderBpm();
+        }
+        return;
+      }
       let json = null;
       try { json = JSON.parse(text || ''); } catch (e) { json = null; }
       app.state.bpm = app.state.bpm || { packs: [], store: {} };
@@ -7518,6 +7585,12 @@
 
     panel.addEventListener('change', (e) => {
       const elName = e.target.dataset && e.target.dataset.el;
+      if (elName === 'bpmAutoQuick') {
+        app.state.bpm = app.state.bpm || { packs: [], store: {} };
+        app.state.bpm.autoQuick = e.target.checked;
+        save();
+        return;
+      }
       if (elName === 'bidTarget') { app.state.bidLastTarget = e.target.value; save(); loadBidParams(true); return; }
       if (elName && (BID_FIELDS.includes(elName) || BID_CHECKS.includes(elName))) storeBidParams();
       if (e.target.dataset.el === 'periodFrom' || e.target.dataset.el === 'periodTo') {
@@ -7628,6 +7701,10 @@
       },
       syncFromTransferList(items, pile) {
         applySync(items, true, pile);
+        if (pile === 'unassigned' && bpmAutoQuick()) {
+          const n = reconcileBpmUnassigned(app.state.ledger, items);
+          if (n) { save(); log('BPM: ' + n + ' carta(s) saíram dos Não atribuídos sem ir para a lista nem para o clube: contei como venda rápida.', 'info'); }
+        }
         if (!panel.hidden && tab === 'profit') renderBpm();
         if (!panel.hidden && tab === 'targets' && !el('targets').contains(doc.activeElement)) renderTargets();
       },
@@ -8398,7 +8475,7 @@
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     countdownText, engineWaitText, rarityName, rarityList, setRarityNames, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
-    bidParamKey, saveBidParams, encodeBackup, decodeBackup, bpmSuggestPrice, bpmSellable, bpmPriceCriteria, learnStorePacks, parsePackPurchase, isBpmPack, recordBpmPack, markBpmQuickSell, bpmRealized, bpmSummary, bpmPackRows, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
+    bidParamKey, saveBidParams, encodeBackup, decodeBackup, bpmSuggestPrice, bpmSellable, bpmPriceCriteria, applyBpmMutation, reconcileBpmUnassigned, learnStorePacks, parsePackPurchase, isBpmPack, recordBpmPack, markBpmQuickSell, bpmRealized, bpmSummary, bpmPackRows, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

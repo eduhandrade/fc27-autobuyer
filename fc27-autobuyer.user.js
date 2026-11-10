@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.14.1
+// @version      1.15.0
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.14.1';
+  const SCRIPT_VERSION = '1.15.0';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -2362,9 +2362,13 @@
     };
   }
 
-  function installPileCapture(win, onPile, onPack) {
+  function installPileCapture(win, onPile, onPack, onDelete) {
     if (win.__fcabPileCapture) return;
     win.__fcabPileCapture = true;
+    const delHandle = (method, url, status, body) => {
+      if (!onDelete || !/^delete$/i.test(method || '') || !(status >= 200 && status < 300)) return;
+      try { onDelete(String(url || ''), typeof body === 'string' ? body : ''); } catch (e) { /* ignora */ }
+    };
     const packHandle = (method, url, status, body, text) => {
       if (!onPack) return;
       try { onPack(summarizePackCapture(method, url, status, body, text), text); } catch (e) { /* ignora */ }
@@ -2389,6 +2393,11 @@
               try { packHandle(method, url, this.status, this.__fcabBody, this.responseText); } catch (e) { /* ignora */ }
             });
           }
+          if (/^delete$/i.test(method || '')) {
+            this.addEventListener('load', () => {
+              try { delHandle(method, url, this.status, this.__fcabBody); } catch (e) { /* ignora */ }
+            });
+          }
           if (pileFromUrl(url)) {
             this.addEventListener('load', () => {
               try { if (this.status >= 200 && this.status < 300) handle(url, this.responseText); } catch (e) { /* ignora */ }
@@ -2407,6 +2416,10 @@
         if (isPackUrl(url, method)) {
           const body = init && typeof init.body === 'string' ? init.body : '';
           p.then((r) => { if (r) r.clone().text().then((t) => packHandle(method, url, r.status, body, t)).catch(() => {}); }).catch(() => {});
+        }
+        if (/^delete$/i.test(method)) {
+          const body = init && typeof init.body === 'string' ? init.body : '';
+          p.then((r) => { if (r) delHandle(method, url, r.status, body); }).catch(() => {});
         }
         if (pileFromUrl(url)) {
           p.then((r) => { if (r && r.ok) r.clone().text().then((t) => handle(url, t)).catch(() => {}); }).catch(() => {});
@@ -3806,6 +3819,192 @@
     return store;
   }
 
+  // ---------------------------------------------------------------------------
+  // BPM (Bronze Pack Method): pacotes de 750 e o que as cartas deles renderam
+  // ---------------------------------------------------------------------------
+
+  const BPM_PACK_COST = 750;
+  const BPM_WINDOWS = [1, 2, 4, 6, 12, 24];
+
+  // Pacotes da loja (GET store/purchaseGroup): { packId: { coins, group } }.
+  function learnStorePacks(json, into) {
+    const out = into || {};
+    const list = (json && Array.isArray(json.purchase)) ? json.purchase : [];
+    for (const p of list) {
+      if (!p || !(p.id > 0)) continue;
+      const coins = p.coins > 0 ? p.coins : ((p.currencies || []).find((c) => c && c.name === 'COINS') || {}).finalFunds || 0;
+      out[p.id] = { coins, group: (p.displayGroup && p.displayGroup.value) || '' };
+    }
+    return out;
+  }
+
+  // Compra de pacote (POST purchased/items {packId}) → pacote com as cartas.
+  function parsePackPurchase(cap, json, storePacks) {
+    if (!cap || cap.method !== 'POST' || !/\/purchased\/items/i.test(cap.path) || !(cap.status >= 200 && cap.status < 300)) return null;
+    let req = {};
+    try { req = JSON.parse(cap.request || '{}') || {}; } catch (e) { req = {}; }
+    const packId = req.packId || (json && json.purchasedPackId) || 0;
+    const list = json && Array.isArray(json.itemList) ? json.itemList : null;
+    if (!packId || !list || !list.length) return null;
+    if (req.currency && req.currency !== 'COINS') return null;
+    const known = storePacks && storePacks[packId];
+    const cost = known && known.coins > 0 ? known.coins : (packId === 101 ? BPM_PACK_COST : 0);
+    return {
+      packId,
+      cost,
+      at: cap.at || Date.now(),
+      items: list.filter((x) => x && x.id > 0).map((x) => ({
+        id: x.id,
+        rating: x.rating || 0,
+        type: String(x.itemType || ''),
+        resourceId: x.resourceId || x.assetId || 0,
+        assetId: x.assetId || 0,
+        discardValue: x.discardValue || 0,
+        marketAverage: x.marketAverage || 0,
+        untradeable: !!x.untradeable,
+      })),
+    };
+  }
+
+  function isBpmPack(pack) {
+    return !!pack && pack.cost === BPM_PACK_COST;
+  }
+
+  const BPM_TYPE_NAMES = { player: 'Jogador', manager: 'Técnico', training: 'Consumível', health: 'Consumível', contract: 'Contrato', fitness: 'Fitness', kit: 'Uniforme', badge: 'Escudo', stadium: 'Estádio' };
+
+  // Grava o pacote e cria um registro (fora do lucro principal) por carta.
+  function recordBpmPack(state, pack, nameOf) {
+    state.bpm = state.bpm || { packs: [], store: {} };
+    const key = 'p' + pack.at;
+    if (state.bpm.packs.some((p) => p.key === key)) return null;
+    state.bpm.packs.push({ key, at: pack.at, packId: pack.packId, cost: pack.cost, ids: pack.items.map((x) => x.id) });
+    if (state.bpm.packs.length > 500) state.bpm.packs.splice(0, state.bpm.packs.length - 500);
+    state.ledger = state.ledger || {};
+    for (const it of pack.items) {
+      const k = ledgerKey(it.id);
+      const name = (nameOf && it.type === 'player' && nameOf(it.assetId || it.resourceId)) || ((BPM_TYPE_NAMES[it.type] || it.type || 'Carta') + (it.rating ? ' ' + it.rating : ''));
+      state.ledger[k] = Object.assign({}, state.ledger[k] || {}, {
+        itemId: it.id,
+        name,
+        rating: it.rating,
+        definitionId: it.resourceId,
+        cost: 0,
+        source: 'bpm',
+        origin: 'bpm',
+        ignored: true,
+        autoIgnored: false,
+        boughtAt: pack.at,
+        status: (state.ledger[k] && state.ledger[k].status) || 'comprada',
+        packKey: key,
+        itemType: it.type,
+        marketAverage: it.marketAverage,
+        discardValue: it.discardValue,
+        untradeable: it.untradeable,
+      });
+    }
+    return key;
+  }
+
+  // Venda rápida (DELETE com os IDs das cartas): marca as cartas do BPM.
+  function idsInRequest(url, body) {
+    const out = new Set();
+    String((url || '') + ' ' + (body || '')).replace(/\d{9,}/g, (m) => { out.add(parseInt(m, 10)); return m; });
+    return out;
+  }
+  function markBpmQuickSell(ledger, url, body, now) {
+    let n = 0;
+    for (const id of idsInRequest(url, body)) {
+      const e = ledger && ledger[ledgerKey(id)];
+      if (!e || e.source !== 'bpm' || e.status === 'vendida' || e.status === 'venda rápida') continue;
+      e.status = 'venda rápida';
+      e.qsValue = e.discardValue || 0;
+      e.qsAt = now || Date.now();
+      n++;
+    }
+    return n;
+  }
+
+  // Quanto a carta já rendeu (vendida: valor − 5%; venda rápida: valor) e
+  // quando. Em SBC/clube conta 0.
+  function bpmRealized(e) {
+    if (e.status === 'vendida' && e.soldFor > 0) return { value: netAfterTax(e.soldFor), at: e.soldAt || 0 };
+    if (e.status === 'venda rápida') return { value: e.qsValue || 0, at: e.qsAt || 0 };
+    return null;
+  }
+
+  // Estimativa do que ainda está à venda (anúncio − 5%).
+  function bpmOpenEstimate(e) {
+    if (bpmRealized(e) || e.status === 'removida' || e.closedZero) return 0;
+    if ((e.status === 'à venda' || e.status === 'expirada') && e.listedFor > 0) return netAfterTax(e.listedFor);
+    return 0;
+  }
+
+  // Resumo das duas visões numa janela de N horas.
+  function bpmSummary(state, hours, now) {
+    now = now || Date.now();
+    const from = now - hours * 3600000;
+    const packs = ((state.bpm && state.bpm.packs) || []).filter((p) => p.cost === BPM_PACK_COST);
+    const ledger = state.ledger || {};
+    const entries = Object.values(ledger).filter((e) => e && e.source === 'bpm');
+    // Caixa: o que saiu (pacotes) e entrou (vendas) dentro da janela.
+    const cash = { packs: 0, cost: 0, sales: 0, quick: 0, soldCount: 0, result: 0 };
+    packs.forEach((p) => { if (p.at >= from && p.at <= now) { cash.packs++; cash.cost += p.cost; } });
+    entries.forEach((e) => {
+      const r = bpmRealized(e);
+      if (!r || r.at < from || r.at > now) return;
+      cash.soldCount++;
+      if (e.status === 'venda rápida') cash.quick += r.value;
+      else cash.sales += r.value;
+    });
+    cash.result = cash.sales + cash.quick - cash.cost;
+    // Por pacote: pacotes abertos na janela e tudo o que as cartas deles renderam.
+    const inWin = packs.filter((p) => p.at >= from && p.at <= now);
+    const keys = new Set(inWin.map((p) => p.key));
+    const cohort = { packs: inWin.length, cost: 0, realized: 0, openEstimate: 0, items: 0, sold: 0, open: 0, result: 0, roi: 0 };
+    inWin.forEach((p) => { cohort.cost += p.cost; cohort.items += p.ids.length; });
+    const top = new Map();
+    entries.forEach((e) => {
+      if (!keys.has(e.packKey)) return;
+      const r = bpmRealized(e);
+      if (r) {
+        cohort.realized += r.value;
+        cohort.sold++;
+        const name = BPM_TYPE_NAMES[e.itemType] && e.itemType !== 'player' ? BPM_TYPE_NAMES[e.itemType] : (e.name || 'Carta');
+        const t = top.get(name) || { name, value: 0, count: 0 };
+        t.value += r.value;
+        t.count++;
+        top.set(name, t);
+      } else {
+        const est = bpmOpenEstimate(e);
+        if (est > 0) { cohort.openEstimate += est; cohort.open++; }
+      }
+    });
+    cohort.result = cohort.realized - cohort.cost;
+    cohort.roi = cohort.cost ? cohort.result / cohort.cost : 0;
+    return {
+      hours, from, cash, cohort,
+      perHour: hours ? Math.round(cash.result / hours) : 0,
+      top: Array.from(top.values()).sort((a, b) => b.value - a.value).slice(0, 5),
+    };
+  }
+
+  // Últimos pacotes com o resultado de cada um.
+  function bpmPackRows(state, limit) {
+    const ledger = state.ledger || {};
+    return ((state.bpm && state.bpm.packs) || []).filter((p) => p.cost === BPM_PACK_COST).slice(-(limit || 10)).reverse().map((p) => {
+      let realized = 0;
+      let sold = 0;
+      let listed = 0;
+      p.ids.forEach((id) => {
+        const e = ledger[ledgerKey(id)];
+        if (!e) return;
+        const r = bpmRealized(e);
+        if (r) { realized += r.value; sold++; } else if (bpmOpenEstimate(e) > 0) listed++;
+      });
+      return { key: p.key, at: p.at, cost: p.cost, items: p.ids.length, sold, listed, realized, result: realized - p.cost };
+    });
+  }
+
   // Backup de todos os dados do bot (cópia para colar numa nota).
   const BACKUP_PREFIX = 'FCAB-BKP1:';
   function encodeBackup(state) {
@@ -3857,6 +4056,7 @@
           bidSession: saved.bidSession && Array.isArray(saved.bidSession.ids) ? saved.bidSession : null,
           bidParams: saved.bidParams && typeof saved.bidParams === 'object' ? saved.bidParams : {},
           lastBackupAt: saved.lastBackupAt > 0 ? saved.lastBackupAt : 0,
+          bpm: saved.bpm && Array.isArray(saved.bpm.packs) ? Object.assign({ store: {} }, saved.bpm) : { packs: [], store: {} },
           bidLastTarget: typeof saved.bidLastTarget === 'string' ? saved.bidLastTarget : '',
         };
       },
@@ -4304,12 +4504,17 @@
           <div class="rows" data-el="profitRows"></div>
         </div>
         <div class="card">
-          <div class="card-h">📦 BPM — diagnóstico da compra de pacote</div>
-          <p class="hint">Passo 1 do rastreio do BPM: com o Web App aberto, compre e abra 1 pacote bronze (750) na loja. O bot guarda o que o Web App
-            mandou e recebeu. Depois toque em <b>Copiar diagnóstico</b> e mande no chat.</p>
-          <div class="result" data-el="packDiag">Nenhuma compra de pacote capturada ainda.</div>
-          <button class="full" data-act="packDiagCopy">📋 Copiar diagnóstico do pacote</button>
-          <textarea data-el="packDiagText" rows="4" readonly hidden></textarea>
+          <div class="card-h">📦 Lucro do BPM (pacotes de 750)</div>
+          <p class="hint">Com o bot carregado, cada pacote de 750 comprado no Web App entra aqui sozinho, com as cartas dele. As vendas entram quando
+            você abre a lista de transferências (antes de "Clear Sold"). Venda rápida conta pelo valor de venda rápida; carta usada em SBC ou guardada conta 0.</p>
+          <div class="chips" data-el="bpmChips"></div>
+          <div data-el="bpmBox"></div>
+          <button class="full" data-act="profitSync">Atualizar com a lista de transferências</button>
+          <details><summary class="hint">Diagnóstico da compra de pacote</summary>
+            <div class="result" data-el="packDiag">Nenhuma compra de pacote capturada ainda.</div>
+            <button class="full" data-act="packDiagCopy">📋 Copiar diagnóstico do pacote</button>
+            <textarea data-el="packDiagText" rows="4" readonly hidden></textarea>
+          </details>
         </div>
       </section>
     `;
@@ -4378,7 +4583,7 @@
       panel.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
       panel.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
       if (tab === 'log') renderLog();
-      if (tab === 'profit') renderProfit();
+      if (tab === 'profit') { renderProfit(); renderBpm(); }
       if (tab === 'settings') renderBackupInfo();
       if (tab === 'bids') renderBidTargets();
       if (tab === 'sbc') { renderSbc(); renderPts(); }
@@ -4940,6 +5145,7 @@
         }).join('') + '</div>'
         : '';
       const entries = Object.values(ledger())
+        .filter((e) => e.source !== 'bpm')
         .filter((e) => !period || inPeriod(e.status === 'vendida' ? e.soldAt : e.boughtAt, period))
         .sort((a, b) => (b.soldAt || b.boughtAt || 0) - (a.soldAt || a.boughtAt || 0)).slice(0, 80);
       el('profitRows').innerHTML = entries.map((e) => {
@@ -5287,7 +5493,62 @@
 
     // ---------- BPM: diagnóstico da compra de pacote ----------
     const packCaptures = [];
-    function onPackCapture(cap) {
+    let bpmHours = 6;
+    function renderBpm() {
+      el('bpmChips').innerHTML = BPM_WINDOWS.map((h) => '<button type="button" class="chip' + (h === bpmHours ? ' on' : '') + '" data-bpm-h="' + h + '">' + h + ' h</button>').join('');
+      const sum = bpmSummary(app.state, bpmHours);
+      const c = sum.cash;
+      const k = sum.cohort;
+      const pct = (x) => (x >= 0 ? '+' : '') + Math.round(x * 100) + '%';
+      const rows = bpmPackRows(app.state, 10);
+      el('bpmBox').innerHTML =
+        '<div class="ed-h">💵 Caixa (últimas ' + bpmHours + ' h)</div><div class="kpis">' +
+        '<div class="kpi"><span>Resultado</span>' + money(c.result) + '</div>' +
+        '<div class="kpi"><span>Por hora</span>' + money(sum.perHour) + '</div>' +
+        '<div class="kpi"><span>Pacotes comprados</span><b>' + c.packs + ' · ' + fmt(c.cost) + '</b></div>' +
+        '<div class="kpi"><span>Vendas (sem os 5%)</span><b>' + fmt(c.sales) + '</b></div>' +
+        '<div class="kpi"><span>Venda rápida</span><b>' + fmt(c.quick) + '</b></div>' +
+        '<div class="kpi"><span>Cartas vendidas</span><b>' + c.soldCount + '</b></div></div>' +
+        '<div class="ed-h">📦 Por pacote (abertos nas últimas ' + bpmHours + ' h)</div><div class="kpis">' +
+        '<div class="kpi"><span>Resultado realizado</span>' + money(k.result) + '</div>' +
+        '<div class="kpi"><span>Retorno</span><b>' + (k.cost ? pct(k.roi) : '—') + '</b></div>' +
+        '<div class="kpi"><span>Pacotes · custo</span><b>' + k.packs + ' · ' + fmt(k.cost) + '</b></div>' +
+        '<div class="kpi"><span>Já rendeu</span><b>' + fmt(k.realized) + '</b></div>' +
+        '<div class="kpi"><span>À venda (estimado)</span><b>' + fmt(k.openEstimate) + ' · ' + k.open + ' carta(s)</b></div>' +
+        '<div class="kpi"><span>Se vender o anunciado</span>' + money(k.result + k.openEstimate) + '</div></div>' +
+        (sum.top.length ? '<div class="ed-h">🏆 O que mais rendeu</div><div class="rows">' + sum.top.map((t) =>
+          '<div class="r"><div>' + escapeHtml(t.name) + ' · ' + t.count + 'x</div><div><b>' + fmt(t.value) + '</b></div></div>').join('') + '</div>' : '') +
+        (rows.length ? '<div class="ed-h">Últimos pacotes</div><div class="rows">' + rows.map((r) =>
+          '<div class="r"><div>' + new Date(r.at).toLocaleString('pt-BR').slice(0, 17) + ' · ' + r.items + ' cartas · vendidas ' + r.sold +
+          (r.listed ? ' · à venda ' + r.listed : '') + '</div><div>' + money(r.result) + '</div></div>').join('') + '</div>'
+          : '<p class="hint">Nenhum pacote de 750 registrado ainda. Compre um com o bot carregado.</p>');
+    }
+
+    function onDeleteRequest(url, body) {
+      const n = markBpmQuickSell(app.state.ledger, url, body);
+      if (n) {
+        save();
+        log('BPM: ' + n + ' carta(s) em venda rápida registradas.', 'info');
+        if (tab === 'profit' && !panel.hidden) renderBpm();
+      }
+    }
+
+    function onPackCapture(cap, text) {
+      let json = null;
+      try { json = JSON.parse(text || ''); } catch (e) { json = null; }
+      app.state.bpm = app.state.bpm || { packs: [], store: {} };
+      if (json && Array.isArray(json.purchase)) { learnStorePacks(json, app.state.bpm.store); save(); }
+      const pack = parsePackPurchase(cap, json, app.state.bpm.store);
+      if (pack && isBpmPack(pack)) {
+        const nameOf = (id) => (deps.players && deps.players.name && deps.players.name(id)) || '';
+        if (recordBpmPack(app.state, pack, nameOf)) {
+          save();
+          log('BPM: pacote de ' + fmt(pack.cost) + ' registrado (' + pack.items.length + ' cartas).', 'success');
+          if (tab === 'profit' && !panel.hidden) renderBpm();
+        }
+      } else if (pack) {
+        log('Pacote de ' + (pack.cost ? fmt(pack.cost) : 'preço desconhecido') + ' (id ' + pack.packId + ') não entra no BPM (só os de 750).', 'muted');
+      }
       packCaptures.unshift(cap);
       if (packCaptures.length > 8) packCaptures.length = 8;
       el('packDiag').innerHTML = packCaptures.map((c) => escapeHtml(new Date(c.at).toLocaleTimeString('pt-BR') + ' ' + c.method + ' ' + c.path.slice(0, 80) +
@@ -6729,6 +6990,8 @@
         if (input.dataset.el === 'bidSell' || input.dataset.el === 'bidMax') updateBidSellProfit();
         return;
       }
+      const bpmBtn = e.target.closest('[data-bpm-h]');
+      if (bpmBtn) { bpmHours = parseInt(bpmBtn.dataset.bpmH, 10) || 6; renderBpm(); return; }
       const periodBtn = e.target.closest('[data-period]');
       if (periodBtn) {
         periodName = periodBtn.dataset.period;
@@ -7112,6 +7375,7 @@
       onCaptured,
       checkHealth: () => showHealth(false),
       onPackCapture,
+      onDeleteRequest,
       syncWatchList(items) {
         const n = recordWonBids(ledger(), items);
         if (n) {
@@ -7122,6 +7386,7 @@
       },
       syncFromTransferList(items, pile) {
         applySync(items, true, pile);
+        if (!panel.hidden && tab === 'profit') renderBpm();
         if (!panel.hidden && tab === 'targets' && !el('targets').contains(doc.activeElement)) renderTargets();
       },
       refreshTargets() {
@@ -7808,7 +8073,7 @@
       piles[which] = { at: Date.now(), items };
       if (ui && (which === 'transfer' || which === 'unassigned')) ui.syncFromTransferList(items, which);
       if (ui && which === 'watch') ui.syncWatchList(items);
-    }, (cap) => { if (ui) ui.onPackCapture(cap); });
+    }, (cap, text) => { if (ui) ui.onPackCapture(cap, text); }, (url, body) => { if (ui) ui.onDeleteRequest(url, body); });
     const adapter = createEaAdapter(win);
     const bridge = createBridgeRequest(win);
     const futbinRequest = withCircuitBreaker(bridge);
@@ -7891,7 +8156,7 @@
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     countdownText, engineWaitText, rarityName, rarityList, setRarityNames, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
-    bidParamKey, saveBidParams, encodeBackup, decodeBackup, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
+    bidParamKey, saveBidParams, encodeBackup, decodeBackup, learnStorePacks, parsePackPurchase, isBpmPack, recordBpmPack, markBpmQuickSell, bpmRealized, bpmSummary, bpmPackRows, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

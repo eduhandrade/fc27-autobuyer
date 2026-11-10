@@ -108,3 +108,19 @@ test('BPM: preço sugerido e cartas ainda vendáveis', () => {
   };
   assert.deepEqual(ab.bpmSellable(ledger).map((x) => x.status), ['comprada', 'expirada']);
 });
+
+test('BPM: busca de preço para jogador, técnico e consumível', () => {
+  assert.deepEqual(ab.bpmPriceCriteria({ definitionId: 79169, itemType: 'player' }), { type: 'player', maskedDefId: 79169 });
+  assert.deepEqual(ab.bpmPriceCriteria({ definitionId: 1082482, itemType: 'manager' }), { type: 'staff', category: 'manager', maskedDefId: 1082482, defId: [1082482] });
+  assert.deepEqual(ab.bpmPriceCriteria({ definitionId: 5002004, itemType: 'training' }), { type: 'training', defId: [5002004] });
+  assert.equal(ab.bpmPriceCriteria({ itemType: 'player' }), null);
+});
+
+test('BPM: preço de mercado usa a busca do tipo certo', async () => {
+  const searched = [];
+  const adapter = { async search(c) { searched.push(c); return { success: true, items: [{ definitionId: 5002004, buyNow: 450 }, { definitionId: 1, buyNow: 200 }] }; } };
+  const r = await ab.lowestBin({ adapter, card: { definitionId: 5002004, criteria: { type: 'training', defId: [5002004] } }, wait: () => Promise.resolve() });
+  assert.equal(r.price, 450);
+  assert.equal(searched[0].type, 'training');
+  assert.deepEqual(searched[0].defId, [5002004]);
+});

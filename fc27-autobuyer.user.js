@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.14.0
+// @version      1.14.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.14.0';
+  const SCRIPT_VERSION = '1.14.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -4305,7 +4305,7 @@
         </div>
         <div class="card">
           <div class="card-h">📦 BPM — diagnóstico da compra de pacote</div>
-          <p class="hint">Passo 1 do rastreio do BPM: com o Web App aberto, compre e abra 1 pacote bronze (740) na loja. O bot guarda o que o Web App
+          <p class="hint">Passo 1 do rastreio do BPM: com o Web App aberto, compre e abra 1 pacote bronze (750) na loja. O bot guarda o que o Web App
             mandou e recebeu. Depois toque em <b>Copiar diagnóstico</b> e mande no chat.</p>
           <div class="result" data-el="packDiag">Nenhuma compra de pacote capturada ainda.</div>
           <button class="full" data-act="packDiagCopy">📋 Copiar diagnóstico do pacote</button>

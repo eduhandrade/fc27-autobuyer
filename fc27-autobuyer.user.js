@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.15.0
+// @version      1.15.1
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.15.0';
+  const SCRIPT_VERSION = '1.15.1';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -3988,6 +3988,19 @@
     };
   }
 
+  // Preço sugerido para anunciar uma carta do pacote: mercado agora, senão a
+  // média da EA, senão o piso de 200 (sempre na escala de preços da EA).
+  function bpmSuggestPrice(marketNow, eaAverage) {
+    const base = marketNow > 0 ? marketNow : eaAverage > 0 ? eaAverage : 200;
+    return Math.max(200, roundDown(base));
+  }
+
+  // Cartas do BPM que ainda podem ser vendidas (não vendidas, não em SBC).
+  function bpmSellable(ledger) {
+    return Object.values(ledger || {}).filter((e) => e && e.source === 'bpm' && !bpmRealized(e) &&
+      e.status !== 'à venda' && e.status !== 'removida' && !e.closedZero);
+  }
+
   // Últimos pacotes com o resultado de cada um.
   function bpmPackRows(state, limit) {
     const ledger = state.ledger || {};
@@ -4510,6 +4523,15 @@
           <div class="chips" data-el="bpmChips"></div>
           <div data-el="bpmBox"></div>
           <button class="full" data-act="profitSync">Atualizar com a lista de transferências</button>
+          <div class="ed-h">🏷️ Vender as cartas dos pacotes</div>
+          <p class="hint">Carrega as cartas dos pacotes que ainda não foram vendidas (Não atribuídos e lista de transferências), consulta o preço e anuncia daqui mesmo (1 hora).</p>
+          <button class="full" data-act="bpmLoad">📥 Carregar cartas dos pacotes</button>
+          <div data-el="bpmSellBox"></div>
+          <div data-el="bpmSellActions" hidden>
+            <button class="full price" data-act="bpmPrices">💲 Preço de mercado das marcadas</button>
+            <button class="full go" data-act="bpmList">🏷️ Anunciar as marcadas</button>
+          </div>
+          <div class="bidlog" data-el="bpmLog" hidden></div>
           <details><summary class="hint">Diagnóstico da compra de pacote</summary>
             <div class="result" data-el="packDiag">Nenhuma compra de pacote capturada ainda.</div>
             <button class="full" data-act="packDiagCopy">📋 Copiar diagnóstico do pacote</button>
@@ -5522,6 +5544,134 @@
           '<div class="r"><div>' + new Date(r.at).toLocaleString('pt-BR').slice(0, 17) + ' · ' + r.items + ' cartas · vendidas ' + r.sold +
           (r.listed ? ' · à venda ' + r.listed : '') + '</div><div>' + money(r.result) + '</div></div>').join('') + '</div>'
           : '<p class="hint">Nenhum pacote de 750 registrado ainda. Compre um com o bot carregado.</p>');
+    }
+
+    // ---------- BPM: vender as cartas dos pacotes ----------
+    let bpmRows = [];
+    let bpmLogLines = [];
+    function bpmTrace(msg, level) {
+      const box = el('bpmLog');
+      box.hidden = false;
+      bpmLogLines.unshift('<div class="' + (level || 'info') + '">' + new Date().toLocaleTimeString('pt-BR') + ' ' + escapeHtml(msg) + '</div>');
+      if (bpmLogLines.length > 60) bpmLogLines.length = 60;
+      box.innerHTML = bpmLogLines.join('');
+    }
+
+    async function bpmLoad(btn) {
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      modBusy = 'BPM';
+      const label = btn.textContent;
+      btn.textContent = 'Carregando…';
+      try {
+        const byId = new Map();
+        for (const w of ['unassigned', 'transfer']) {
+          const r = await readPile(w);
+          if (!r.ok) { bpmTrace('Não consegui ler ' + PILE_NAMES[w] + ' (' + r.why + ').', 'warn'); continue; }
+          applySync(r.items, true, w);
+          r.items.forEach((it) => { if (it.id > 0) byId.set(it.id, it); });
+        }
+        const open = bpmSellable(ledger());
+        bpmRows = open.map((e) => {
+          const it = byId.get(e.itemId) || null;
+          const ea = (it && it.marketAverage) || e.marketAverage || 0;
+          return { e, it, ea, price: bpmSuggestPrice(0, ea), use: !!(it && it.raw && !it.untradeable && !e.untradeable) };
+        }).filter((r) => r.it).sort((a, b) => (b.ea || 0) - (a.ea || 0));
+        const gone = open.length - bpmRows.length;
+        bpmTrace(bpmRows.length + ' carta(s) dos pacotes para vender' + (gone ? ' · ' + gone + ' não estão mais nas listas (usadas em SBC, no clube ou vendidas antes)' : '') + '.', 'info');
+        renderBpmSell();
+      } finally {
+        modBusy = '';
+        btn.textContent = label;
+      }
+    }
+
+    function renderBpmSell() {
+      el('bpmSellActions').hidden = !bpmRows.length;
+      el('bpmSellBox').innerHTML = bpmRows.length ? bpmRows.map((r, i) => {
+        const m = deps.market && deps.market.get(r.e.definitionId);
+        const now = r.e.itemType !== 'player' ? '' : m && m.state === 'checking' ? 'mercado agora …' : m && m.price > 0 ? 'mercado agora ' + fmt(m.price) : m ? 'mercado: sem anúncio' : '';
+        const blocked = !r.it.raw ? 'abra os Não atribuídos no Web App para poder anunciar' : (r.it.untradeable || r.e.untradeable) ? 'intransferível (venda rápida ' + fmt(r.e.discardValue || 0) + ')' : '';
+        const info = [now, r.ea ? 'média EA ' + fmt(r.ea) : '', r.e.discardValue ? 'venda rápida ' + fmt(r.e.discardValue) : '', blocked, r.done || ''].filter(Boolean).join(' · ');
+        const off = blocked || r.listed ? ' disabled' : '';
+        return '<div class="sbc-row" style="grid-template-columns:26px 1fr" data-bi="' + i + '">' +
+          '<input type="checkbox" data-bpm="use"' + (r.use && !off ? ' checked' : '') + off + '>' +
+          '<div><b>' + escapeHtml(r.e.name || 'Carta') + '</b>' + (r.e.rating && !/\d$/.test(r.e.name || '') ? ' ' + r.e.rating : '') +
+          '<div class="hint">' + escapeHtml(info) + '</div>' +
+          '<div class="stepper" style="margin-top:4px"><button type="button" data-step="-" aria-label="Diminuir">−</button>' +
+          '<input data-bpm="price" inputmode="numeric" value="' + r.price + '"' + off + '>' +
+          '<button type="button" data-step="+" aria-label="Aumentar">+</button><button type="button" data-bpm-one="' + i + '"' + off + '>Anunciar</button></div></div></div>';
+      }).join('') : '<p class="hint">Toque em Carregar para ver as cartas.</p>';
+    }
+
+    function onBpmInput(e) {
+      const row = e.target.closest('[data-bi]');
+      if (!row) return;
+      const r = bpmRows[parseInt(row.dataset.bi, 10)];
+      if (!r) return;
+      if (e.target.dataset.bpm === 'use') r.use = e.target.checked;
+      if (e.target.dataset.bpm === 'price') r.price = parseCoins(e.target.value);
+    }
+
+    function bpmPrices(btn) {
+      if (modBusy === 'preços') { modStop = true; return; }
+      const cards = bpmRows.filter((r) => r.use && r.e.itemType === 'player' && r.e.definitionId > 0)
+        .map((r) => ({ name: r.e.name, definitionId: r.e.definitionId, rating: r.e.rating }));
+      if (!cards.length) return win.alert('Marque pelo menos um jogador (técnicos e consumíveis usam a média da EA).');
+      cards.forEach((c) => { const m = deps.market.get(c.definitionId); if (m && m.state !== 'checking') deps.market.delete(c.definitionId); });
+      const label = btn.textContent;
+      checkPrices(cards, {
+        quiet: true,
+        onUpdate: renderBpmSell,
+        progress: (t) => { btn.textContent = t ? 'Consultando ' + t + ' (toque para parar)' : label; },
+      }).then(() => {
+        // Preço sugerido passa a ser o do mercado agora.
+        bpmRows.forEach((r) => {
+          const m = deps.market.get(r.e.definitionId);
+          if (r.e.itemType === 'player' && m && m.price > 0 && !r.listed) r.price = bpmSuggestPrice(m.price, r.ea);
+        });
+        renderBpmSell();
+      });
+    }
+
+    async function bpmList(onlyIndex) {
+      if (modBusy || engine.running) return win.alert('Espere o bot/módulo terminar.');
+      const rows = onlyIndex != null ? [bpmRows[onlyIndex]].filter(Boolean) : bpmRows.filter((r) => r.use && !r.listed);
+      const ok = rows.filter((r) => r.it && r.it.raw && !r.it.untradeable && !r.e.untradeable);
+      if (!ok.length) return win.alert('Nenhuma carta pronta para anunciar.');
+      const bad = ok.filter((r) => !(r.price >= 200));
+      if (bad.length) return win.alert('Preço mínimo de compra imediata é 200: ' + bad.map((r) => r.e.name).join(', ') + '.');
+      if (onlyIndex == null && !win.confirm('Anunciar ' + ok.length + ' carta(s) por 1 hora?\n\n' + ok.map((r) => r.e.name + ' por ' + fmt(roundDown(r.price))).join('\n') +
+        (app.state.settings.dryRun ? '\n\n(Modo simulação: nada será anunciado.)' : ''))) return;
+      modBusy = 'BPM';
+      modStop = false;
+      try {
+        for (const r of ok) {
+          if (modStop) break;
+          const bin = roundDown(r.price);
+          if (app.state.settings.dryRun) { r.done = 'simulação: anunciaria por ' + fmt(bin); bpmTrace('Simulação: ' + r.e.name + ' por ' + fmt(bin) + '.', 'success'); continue; }
+          let res;
+          try { res = await adapter.list(r.it.raw, prevPrice(bin), bin, 3600); } catch (e) { res = { success: false, status: e.message }; }
+          if (res.success) {
+            r.listed = true;
+            r.done = '✅ anunciada por ' + fmt(bin);
+            r.e.status = 'à venda';
+            r.e.listedFor = bin;
+            bpmTrace('✅ ' + r.e.name + ' anunciada por ' + fmt(bin) + '.', 'success');
+          } else {
+            r.done = '❌ erro ' + res.status;
+            bpmTrace('❌ ' + r.e.name + ': não consegui anunciar (erro ' + res.status + '). Lista de transferências cheia? (máximo 100)', 'warn');
+            if (FATAL_MESSAGES[classifyStatus(res.status)]) { bpmTrace(FATAL_MESSAGES[classifyStatus(res.status)], 'error'); break; }
+          }
+          save();
+          renderBpmSell();
+          await sleepMs(randomBetween(900, 1700, Math.random));
+        }
+      } finally {
+        modBusy = '';
+        save();
+        renderBpmSell();
+        renderBpm();
+      }
     }
 
     function onDeleteRequest(url, body) {
@@ -6990,6 +7140,8 @@
         if (input.dataset.el === 'bidSell' || input.dataset.el === 'bidMax') updateBidSellProfit();
         return;
       }
+      const bpmOne = e.target.closest('[data-bpm-one]');
+      if (bpmOne) { bpmList(parseInt(bpmOne.dataset.bpmOne, 10)); return; }
       const bpmBtn = e.target.closest('[data-bpm-h]');
       if (bpmBtn) { bpmHours = parseInt(bpmBtn.dataset.bpmH, 10) || 6; renderBpm(); return; }
       const periodBtn = e.target.closest('[data-period]');
@@ -7052,6 +7204,9 @@
         if (a === 'backupCopy') copyBackup();
         if (a === 'backupRestore') restoreBackup();
         if (a === 'packDiagCopy') copyPackDiag();
+        if (a === 'bpmLoad') bpmLoad(act);
+        if (a === 'bpmPrices') bpmPrices(act);
+        if (a === 'bpmList') bpmList();
         if (a === 'profitSync') syncProfit();
         if (a === 'profitClear' && win.confirm('Apagar todo o registro de compras e lucro?')) {
           app.state.ledger = {};
@@ -7244,6 +7399,8 @@
 
     el('sbcList').addEventListener('input', onSbcInput);
     el('galList').addEventListener('input', onGalInput);
+    el('bpmSellBox').addEventListener('input', onBpmInput);
+    el('bpmSellBox').addEventListener('change', onBpmInput);
     el('galList').addEventListener('change', onGalInput);
     ['ptsTarget', 'ptsLines', 'ptsPlan'].forEach((k) => el(k).addEventListener('change', onPtsInput));
     el('ptsPlan').addEventListener('click', (e) => {
@@ -8156,7 +8313,7 @@
     ledgerKey, recordBuy, syncLedger, entryProfit, ledgerSummary, inPeriod, dayKey, dayRange, presetPeriod, dailyProfit, runBulkBids, collectWonBids, runBulkSell,
     lowestBin, createMarketCache, clampDock, ptsCandidateTarget, candidatesFromList, playersOfRating, parsePlayersDb, ptsScore, ptsTotal, planPtsFromClub, ptsTarget, planSbcSlots, simplePosition, readPositionFilter, stepPrice, minPriceValues, targetLedgerStats, migrateLedger, recordWonBids, encodeSbc, decodeSbc, futbinImageId, parseSbcCards, sbcTarget, findPileMethod, pileFromUrl, itemFromJson, looksLikeItem, findItemArray, shapeOf, itemsFromPileJson, installPileCapture, readFlag, sellableStats,
     countdownText, engineWaitText, rarityName, rarityList, setRarityNames, exactCriteria, breakEvenPrice, galleryMaxBuy, splitCardLabel, futggDefId, galleryIdsFromUrl, readGalleryTexts, isGreenColor,
-    bidParamKey, saveBidParams, encodeBackup, decodeBackup, learnStorePacks, parsePackPurchase, isBpmPack, recordBpmPack, markBpmQuickSell, bpmRealized, bpmSummary, bpmPackRows, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
+    bidParamKey, saveBidParams, encodeBackup, decodeBackup, bpmSuggestPrice, bpmSellable, learnStorePacks, parsePackPurchase, isBpmPack, recordBpmPack, markBpmQuickSell, bpmRealized, bpmSummary, bpmPackRows, isPackUrl, summarizePackCapture, nextBidAmount, bidAmountFor, bidProblem, keepForChemStyle, cleanWatchList, planBids, watchStatus, groupSellable, sellPrices,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

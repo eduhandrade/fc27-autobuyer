@@ -92,3 +92,19 @@ test('BPM: caixa e resultado por pacote nas janelas de horas', () => {
   // Mesmo pacote não entra duas vezes.
   assert.equal(ab.recordBpmPack(state, p1), null);
 });
+
+test('BPM: preço sugerido e cartas ainda vendáveis', () => {
+  assert.equal(ab.bpmSuggestPrice(1234, 500), 1200);
+  assert.equal(ab.bpmSuggestPrice(0, 198), 200);
+  assert.equal(ab.bpmSuggestPrice(0, 0), 200);
+  assert.equal(ab.bpmSuggestPrice(0, 760), 750);
+  const ledger = {
+    a: { source: 'bpm', status: 'comprada' },
+    b: { source: 'bpm', status: 'vendida', soldFor: 300 },
+    c: { source: 'bpm', status: 'à venda', listedFor: 300 },
+    d: { source: 'bpm', status: 'venda rápida', qsValue: 40 },
+    e: { source: 'bpm', status: 'expirada', listedFor: 300 },
+    f: { source: 'bot', status: 'comprada' },
+  };
+  assert.deepEqual(ab.bpmSellable(ledger).map((x) => x.status), ['comprada', 'expirada']);
+});

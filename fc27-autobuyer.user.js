@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC27 Autobuyer
 // @namespace    fc27-autobuyer
-// @version      1.15.3
+// @version      1.15.4
 // @description  Autobuyer para o Web App do EA SPORTS FC 27 Ultimate Team (uso pessoal, por sua conta e risco)
 // @match        https://www.ea.com/*ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.futbin.com/*
@@ -23,7 +23,7 @@
 
   // A EA só aceita preços em "degraus". Até 1.000 sobe de 50 em 50, até 10.000
   // de 100 em 100, e assim por diante.
-  const SCRIPT_VERSION = '1.15.3';
+  const SCRIPT_VERSION = '1.15.4';
 
   const PRICE_BANDS = [
     { upTo: 1000, step: 50 },
@@ -884,6 +884,9 @@
   // ou sempre que restarem poucas vagas.
   const WATCH_CLEAN_EVERY = 3;
   const WATCH_LOW = 8;
+
+  // Sniper: espera depois de um 403 da EA antes de tentar de novo.
+  const FORBIDDEN_RETRY_MS = 30000;
 
   // Lances recusados seguidos (sem nenhum aceito) antes de parar.
   const MAX_BID_MISSES_IN_ROW = 6;
@@ -1946,6 +1949,7 @@
       this.log = opts.log || function () {};
       this.onChange = opts.onChange || function () {};
       this.onPurchase = opts.onPurchase || function () {};
+      this.forbiddenRetryMs = opts.forbiddenRetryMs || FORBIDDEN_RETRY_MS;
       // Opcional: chamado (e esperado) depois de cada busca de um alvo.
       this.afterSearch = opts.afterSearch || null;
       this.onSearchResults = opts.onSearchResults || function () {};
@@ -1975,6 +1979,8 @@
       this.simCount = new Map();
       this.completedNow = 0;
       this.consecutiveErrors = 0;
+      this.forbiddenCount = 0;
+      this.retryInMs = 0;
       this.stopReason = '';
       this.setStatus('rodando');
       this.log(this.getState().settings.dryRun
@@ -2018,6 +2024,18 @@
         while (this.running) {
           await this.cycle();
           if (!this.running) break;
+          if (this.retryInMs > 0) {
+            const ms = this.retryInMs;
+            this.retryInMs = 0;
+            this.setStatus('pausado');
+            this.waitUntil = Date.now() + ms;
+            await this.wait(ms);
+            this.waitUntil = 0;
+            if (!this.running) break;
+            this.setStatus('rodando');
+            this.log('Voltando a procurar as cartas.', 'info');
+            continue;
+          }
           const s = this.getState().settings;
           if (s.pauseEvery > 0 && this.stats.searches > 0 && this.stats.searches % s.pauseEvery === 0) {
             const ms = jitter(s.pauseMinutes * 60000, 0.2, this.random);
@@ -2070,6 +2088,7 @@
       this.onChange();
       if (!res.success) return this.handleFailure(res.status, 'busca');
       this.consecutiveErrors = 0;
+      this.forbiddenCount = 0;
       this.onSearchResults(target, res.items);
       if (this.afterSearch) {
         await this.afterSearch(target, res.items);
@@ -2188,6 +2207,16 @@
 
     handleFailure(status, what) {
       const kind = classifyStatus(status);
+      // 403 ("a EA bloqueou a ação"): não para; espera 30 s e tenta de novo.
+      if (kind === 'forbidden') {
+        this.stats.errors++;
+        this.forbiddenCount = (this.forbiddenCount || 0) + 1;
+        this.retryInMs = this.forbiddenRetryMs;
+        this.log('A EA recusou a ' + what + ' (código ' + status + '). Esperando ' + Math.round(this.forbiddenRetryMs / 1000) +
+          ' s para tentar de novo (' + this.forbiddenCount + 'ª vez seguida).', 'warn');
+        this.onChange();
+        return;
+      }
       if (FATAL_MESSAGES[kind]) {
         this.log(FATAL_MESSAGES[kind] + ' (código ' + status + ' na ' + what + ')', 'error');
         return this.stop(STOP_REASONS[kind]);

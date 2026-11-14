@@ -198,3 +198,25 @@ test('captura só as buscas feitas manualmente no Web App', async () => {
   await ad.search({ type: 'player', maskedDefId: 1 });
   assert.equal(captured.length, 2);
 });
+
+test('sniper: no 403 da EA espera e tenta de novo em vez de parar', async () => {
+  const adapter = fakeAdapter({
+    searches: [{ success: false, status: 403, items: [] }, { success: false, status: 403, items: [] }, { success: true, status: 200, items: [item(1, 900)] }, { success: true, status: 200, items: [] }],
+  });
+  const purchases = [];
+  const logs = [];
+  const e = new ab.Autobuyer({
+    adapter,
+    getState: () => ({ settings: Object.assign({}, FAST, { maxBuys: 1 }), targets: [target({ maxBuy: 1000 })] }),
+    log: (m) => logs.push(m),
+    onPurchase: (p) => purchases.push(p),
+    random: () => 0.5,
+    forbiddenRetryMs: 5,
+  });
+  await e.start();
+  assert.equal(adapter.calls.search.length, 3);
+  assert.equal(purchases.length, 1);
+  assert.equal(e.stopReason, 'limite de compras atingido');
+  assert.ok(logs.some((m) => /Esperando 0 s|Esperando/.test(m)));
+  assert.ok(logs.some((m) => /2ª vez seguida/.test(m)));
+});
